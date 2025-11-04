@@ -6,7 +6,8 @@ Provides tools for listing workspaces, querying data tables, and monitoring work
 
 from typing import Annotated, Any
 
-from fastmcp import Context, FastMCP, ToolError
+from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from firecloud import api as fapi
 
 # Initialize MCP server

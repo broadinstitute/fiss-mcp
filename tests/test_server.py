@@ -77,7 +77,7 @@ class TestListWorkspaces:
     @pytest.mark.asyncio
     async def test_list_workspaces_api_error(self):
         """Test handling of FISS API errors"""
-        from fastmcp import ToolError
+        from fastmcp.exceptions import ToolError
 
         # Mock failed API response
         mock_response = MagicMock()
@@ -130,7 +130,7 @@ class TestGetWorkspaceDataTables:
     @pytest.mark.asyncio
     async def test_get_data_tables_workspace_not_found(self):
         """Test handling of non-existent workspace"""
-        from fastmcp import ToolError
+        from fastmcp.exceptions import ToolError
 
         mock_response = MagicMock()
         mock_response.status_code = 404
@@ -154,7 +154,7 @@ class TestGetWorkspaceDataTables:
     @pytest.mark.asyncio
     async def test_get_data_tables_access_denied(self):
         """Test handling of permission errors"""
-        from fastmcp import ToolError
+        from fastmcp.exceptions import ToolError
 
         mock_response = MagicMock()
         mock_response.status_code = 403
@@ -243,7 +243,7 @@ class TestGetSubmissionStatus:
     @pytest.mark.asyncio
     async def test_get_submission_status_not_found(self):
         """Test handling of non-existent submission"""
-        from fastmcp import ToolError
+        from fastmcp.exceptions import ToolError
 
         mock_response = MagicMock()
         mock_response.status_code = 404
