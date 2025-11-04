@@ -1103,7 +1103,9 @@ async def submit_workflow(
     config_namespace: Annotated[str, "Method configuration namespace"],
     config_name: Annotated[str, "Method configuration name"],
     entity_type: Annotated[str, "Entity type to run workflow on"],
-    entity_name: Annotated[str | None, "Entity name to run workflow on (or None if using expression)"],
+    entity_name: Annotated[
+        str | None, "Entity name to run workflow on (or None if using expression)"
+    ],
     ctx: Context,
     expression: Annotated[
         str | None,
@@ -1274,6 +1276,151 @@ async def abort_submission(
         raise ToolError(
             f"Failed to abort submission '{submission_id}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+
+# ===== Phase 4: Data Management Tools =====
+
+
+@mcp.tool()
+async def upload_entities(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    entity_data: Annotated[
+        list[dict[str, Any]],
+        "List of entities to upload, each with 'name', 'entityType', and 'attributes' fields",
+    ],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Upload or update entity data in a Terra workspace data table.
+
+    Entities are rows in Terra data tables used as workflow inputs. This tool allows
+    you to add new entities or update existing ones.
+
+    Each entity must have:
+    - name: Unique identifier for the entity (entity ID)
+    - entityType: Type of entity (e.g., 'sample', 'participant', 'sample_set')
+    - attributes: Dictionary of attribute name-value pairs
+
+    Example entity_data:
+    [
+        {
+            "name": "sample_1",
+            "entityType": "sample",
+            "attributes": {
+                "sample_id": "S001",
+                "participant": "P001",
+                "bam_file": "gs://bucket/sample1.bam"
+            }
+        },
+        {
+            "name": "sample_2",
+            "entityType": "sample",
+            "attributes": {
+                "sample_id": "S002",
+                "participant": "P002",
+                "bam_file": "gs://bucket/sample2.bam"
+            }
+        }
+    ]
+
+    Common use cases:
+    - Upload sample metadata for workflow execution
+    - Update entity attributes with new values
+    - Prepare data tables before workflow submission
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        entity_data: List of entities to upload (each with name, entityType, attributes)
+
+    Returns:
+        Dictionary containing:
+        - success: Whether the upload succeeded
+        - entity_count: Number of entities uploaded
+        - entity_type: The entity type that was uploaded
+    """
+    try:
+        # Validate entity_data
+        if not entity_data:
+            raise ToolError(
+                "Entity data cannot be empty. Please provide at least one entity to upload."
+            )
+
+        # Validate entity format
+        for i, entity in enumerate(entity_data):
+            if "name" not in entity:
+                raise ToolError(
+                    f"Entity at index {i} is missing required field 'name'. "
+                    "Each entity must have 'name', 'entityType', and 'attributes'."
+                )
+            if "entityType" not in entity:
+                raise ToolError(
+                    f"Entity at index {i} (name='{entity.get('name')}') is missing required "
+                    "field 'entityType'. Each entity must have 'name', 'entityType', and 'attributes'."
+                )
+            if "attributes" not in entity:
+                raise ToolError(
+                    f"Entity at index {i} (name='{entity.get('name')}') is missing required "
+                    "field 'attributes'. Each entity must have 'name', 'entityType', and 'attributes'."
+                )
+
+        # Get entity type from first entity (all should be same type)
+        entity_type = entity_data[0]["entityType"]
+
+        ctx.info(
+            f"Uploading {len(entity_data)} entities of type '{entity_type}' "
+            f"to workspace {workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.upload_entities(
+            workspace_namespace,
+            workspace_name,
+            entity_data,
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workspace '{workspace_namespace}/{workspace_name}' not found. "
+                "Please verify the workspace namespace and name are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to upload entities to this workspace."
+            )
+        elif response.status_code == 400:
+            ctx.error(f"Bad request: {response.text}")
+            raise ToolError(
+                f"Failed to upload entities (HTTP 400). Common issues: "
+                "invalid entity format, duplicate names, or invalid attribute values. "
+                f"Details: {response.text}"
+            )
+        elif response.status_code not in [200, 201]:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to upload entities (HTTP {response.status_code}). "
+                "Please check the entity data format and workspace permissions."
+            )
+
+        ctx.info(
+            f"Successfully uploaded {len(entity_data)} entities of type '{entity_type}' "
+            f"to {workspace_namespace}/{workspace_name}"
+        )
+
+        return {
+            "success": True,
+            "entity_count": len(entity_data),
+            "entity_type": entity_type,
+            "message": f"Successfully uploaded {len(entity_data)} {entity_type} entities",
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error uploading entities: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to upload entities to workspace {workspace_namespace}/{workspace_name}"
         )
 
 

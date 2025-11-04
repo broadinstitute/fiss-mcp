@@ -20,7 +20,7 @@ class TestServerInitialization:
         assert mcp.name == "Terra.Bio MCP Server"
 
     def test_server_has_tools(self):
-        """Verify all Phase 1, Phase 2, and Phase 3 tools are registered"""
+        """Verify all Phase 1, Phase 2, Phase 3, and Phase 4 tools are registered"""
         # Get registered tools via MCP's internal registry
         # Note: FastMCP uses decorators to register tools
         tools = mcp._tool_manager._tools
@@ -45,6 +45,9 @@ class TestServerInitialization:
         assert "copy_method_config" in tool_names
         assert "submit_workflow" in tool_names
         assert "abort_submission" in tool_names
+
+        # Verify all Phase 4 tools are present
+        assert "upload_entities" in tool_names
 
 
 class TestListWorkspaces:
@@ -1423,3 +1426,163 @@ class TestAbortSubmission:
 
             error_msg = str(exc_info.value)
             assert "Failed to abort" in error_msg or "400" in error_msg
+
+
+# ===== Phase 4: Data Management Tools Tests =====
+
+
+class TestUploadEntities:
+    """Test upload_entities tool"""
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_success(self):
+        """Test successful entity upload"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        entity_data = [
+            {
+                "name": "sample_1",
+                "entityType": "sample",
+                "attributes": {
+                    "sample_id": "S001",
+                    "participant": "P001",
+                    "tissue_type": "blood",
+                },
+            },
+            {
+                "name": "sample_2",
+                "entityType": "sample",
+                "attributes": {
+                    "sample_id": "S002",
+                    "participant": "P002",
+                    "tissue_type": "tumor",
+                },
+            },
+        ]
+
+        with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
+            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+
+            ctx = MagicMock()
+            result = await upload_entities_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=entity_data,
+                ctx=ctx,
+            )
+
+            assert result["success"] is True
+            assert result["entity_count"] == 2
+            assert result["entity_type"] == "sample"
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_workspace_not_found(self):
+        """Test handling of non-existent workspace"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        entity_data = [
+            {
+                "name": "sample_1",
+                "entityType": "sample",
+                "attributes": {"sample_id": "S001"},
+            }
+        ]
+
+        with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
+            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await upload_entities_fn(
+                    workspace_namespace="nonexistent",
+                    workspace_name="workspace",
+                    entity_data=entity_data,
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_access_denied(self):
+        """Test handling of permission errors"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+
+        entity_data = [
+            {
+                "name": "sample_1",
+                "entityType": "sample",
+                "attributes": {"sample_id": "S001"},
+            }
+        ]
+
+        with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
+            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await upload_entities_fn(
+                    workspace_namespace="restricted",
+                    workspace_name="workspace",
+                    entity_data=entity_data,
+                    ctx=ctx,
+                )
+
+            assert "Access denied" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_empty_data(self):
+        """Test handling of empty entity data"""
+        from fastmcp.exceptions import ToolError
+
+        upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+
+        ctx = MagicMock()
+
+        with pytest.raises(ToolError) as exc_info:
+            await upload_entities_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=[],
+                ctx=ctx,
+            )
+
+        error_msg = str(exc_info.value)
+        assert "cannot be empty" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_invalid_format(self):
+        """Test handling of invalid entity data format"""
+        from fastmcp.exceptions import ToolError
+
+        # Missing entityType
+        invalid_data = [
+            {
+                "name": "sample_1",
+                "attributes": {"sample_id": "S001"},
+            }
+        ]
+
+        upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+
+        ctx = MagicMock()
+
+        with pytest.raises(ToolError) as exc_info:
+            await upload_entities_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=invalid_data,
+                ctx=ctx,
+            )
+
+        error_msg = str(exc_info.value)
+        assert "must have" in error_msg or "entityType" in error_msg

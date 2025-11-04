@@ -31,6 +31,10 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 - **`submit_workflow`** - Launch WDL workflows for single entities or batch processing
 - **`abort_submission`** - Cancel running workflow submissions
 
+### Phase 4: Data Management Tools ✅ COMPLETED
+
+- **`upload_entities`** - Upload or update entity data in Terra data tables with validation
+
 ## Use Cases
 
 - **WDL Pipeline Development**: Monitor Terra workflow runs while developing and debugging WDL pipelines with Claude Code
@@ -199,14 +203,15 @@ PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 
 The test suite includes:
 - Server initialization verification
-- Tool registration checks (all 14 tools: 5 Phase 1 + 3 Phase 2 + 6 Phase 3)
+- Tool registration checks (all 15 tools: 5 Phase 1 + 3 Phase 2 + 6 Phase 3 + 1 Phase 4)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
 - Error handling scenarios (404s, 403s, 400s, 409s, API failures, GCS errors)
-- Parameter validation (max_workflows, include_keys, fetch_content, truncate, expression, etc.)
+- Parameter validation (max_workflows, include_keys, fetch_content, truncate, expression, entity_data, etc.)
 - Helper function tests (truncation logic, GCS URL parsing)
 - Phase 2 tool tests (submissions listing, outputs retrieval, cost fetching)
 - Phase 3 tool tests (entities, method configs, workflow submission/abortion)
+- Phase 4 tool tests (entity data upload with validation)
 
 ## Development
 
@@ -290,8 +295,8 @@ See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 - [x] `submit_workflow` - Launch workflows
 - [x] `abort_submission` - Cancel running workflows
 
-### Phase 4: Data Management Tools
-- [ ] `upload_data_to_table` - Upload entity data
+### Phase 4: Data Management Tools ✅ COMPLETED
+- [x] `upload_entities` - Upload entity data to Terra tables
 
 ## Architecture
 
