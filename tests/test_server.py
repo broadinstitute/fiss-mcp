@@ -361,7 +361,9 @@ class TestGetJobMetadata:
             "failures": [{"message": "Task failed"}],
         }
 
-        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response) as mock_call:
+        with patch(
+            "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response
+        ) as mock_call:
             get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
 
             ctx = MagicMock()
