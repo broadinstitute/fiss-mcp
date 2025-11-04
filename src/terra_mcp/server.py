@@ -213,9 +213,7 @@ async def get_submission_status(
             "status_summary": status_counts,
             "workflows": workflows[:10],  # Limit to first 10 for readability
             "note": (
-                f"Showing first 10 of {len(workflows)} workflows"
-                if len(workflows) > 10
-                else None
+                f"Showing first 10 of {len(workflows)} workflows" if len(workflows) > 10 else None
             ),
         }
 
