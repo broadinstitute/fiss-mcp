@@ -29,11 +29,9 @@ jobs:
         python -m pip install --upgrade pip
         # Install setuptools<80 first (required for firecloud)
         pip install "setuptools<80"
-        # Install firecloud with --no-build-isolation to use local setuptools
-        pip install --no-build-isolation firecloud>=0.16.0
-        # Install remaining dependencies from requirements.txt
-        pip install -r requirements.txt
-        # Install test dependencies
+        # Install all dependencies with --no-build-isolation to use local setuptools
+        pip install --no-build-isolation -r requirements.txt
+        # Install test-only dependencies
         pip install pytest-cov
 
     - name: Run tests with pytest
