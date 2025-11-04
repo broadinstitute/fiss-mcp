@@ -33,13 +33,29 @@ cd fiss-mcp
 ```
 
 2. Install dependencies:
+
+**Note**: The `firecloud` package requires special installation due to setuptools compatibility ([fiss#192](https://github.com/broadinstitute/fiss/issues/192)):
+
+```bash
+# Install setuptools<80 first (required for firecloud)
+pip install "setuptools<80"
+
+# Install firecloud with --no-build-isolation
+pip install --no-build-isolation firecloud>=0.16.0
+
+# Install remaining dependencies
+pip install fastmcp>=0.2.0 pydantic>=2.0.0
+```
+
+Or use the requirements file (which includes setuptools):
 ```bash
 pip install -r requirements.txt
 ```
 
 Or install in development mode:
 ```bash
-pip install -e ".[dev]"
+pip install "setuptools<80"
+pip install --no-build-isolation -e ".[dev]"
 ```
 
 3. Verify your Google credentials are configured for FISS:

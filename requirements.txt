@@ -1,5 +1,9 @@
 # Terra.Bio MCP Server Dependencies
 
+# Build dependencies (must be installed first)
+# Required for firecloud installation - see broadinstitute/fiss#192
+setuptools<80
+
 # MCP Framework
 fastmcp>=0.2.0
 
