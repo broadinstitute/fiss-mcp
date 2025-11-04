@@ -26,10 +26,12 @@ class TestServerInitialization:
         tools = mcp._tool_manager._tools
         tool_names = {name for name in tools.keys()}
 
-        # Verify all three Phase 1 tools are present
+        # Verify all Phase 1 tools are present
         assert "list_workspaces" in tool_names
         assert "get_workspace_data_tables" in tool_names
         assert "get_submission_status" in tool_names
+        assert "get_job_metadata" in tool_names
+        assert "get_workflow_logs" in tool_names
 
 
 class TestListWorkspaces:
@@ -273,3 +275,164 @@ class TestGetSubmissionStatus:
             assert "not found" in error_msg
             assert "nonexistent" in error_msg
             assert "test-ns/test-ws" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_get_submission_status_custom_workflow_limit(self):
+        """Test that max_workflows parameter controls workflow list size"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "submissionId": "abc-123",
+            "status": "Running",
+            "submissionDate": "2024-01-01T10:00:00Z",
+            "workflows": [{"workflowId": f"wf-{i}", "status": "Running"} for i in range(25)],
+        }
+
+        with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+
+            ctx = MagicMock()
+
+            # Test with max_workflows=5
+            result = await get_submission_status_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="abc-123",
+                ctx=ctx,
+                max_workflows=5,
+            )
+
+            assert result["workflow_count"] == 25
+            assert len(result["workflows"]) == 5
+            assert "first 5 of 25" in result["note"]
+
+            # Test with max_workflows=0 (return all)
+            result_all = await get_submission_status_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="abc-123",
+                ctx=ctx,
+                max_workflows=0,
+            )
+
+            assert result_all["workflow_count"] == 25
+            assert len(result_all["workflows"]) == 25
+            assert result_all["note"] is None
+
+
+class TestGetJobMetadata:
+    """Test get_job_metadata tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_job_metadata_success(self):
+        """Test successful job metadata retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "workflowName": "test_workflow",
+            "status": "Succeeded",
+            "start": "2024-01-01T10:00:00Z",
+            "end": "2024-01-01T11:00:00Z",
+            "calls": {},
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
+            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+
+            ctx = MagicMock()
+            result = await get_job_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-456",
+                ctx=ctx,
+            )
+
+            assert result["workflowName"] == "test_workflow"
+            assert result["status"] == "Succeeded"
+
+    @pytest.mark.asyncio
+    async def test_get_job_metadata_with_filtering(self):
+        """Test job metadata with include_keys filtering"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "Failed",
+            "failures": [{"message": "Task failed"}],
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response) as mock_call:
+            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+
+            ctx = MagicMock()
+            result = await get_job_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-456",
+                ctx=ctx,
+                include_keys=["status", "failures"],
+            )
+
+            # Verify the API was called with include_key parameter
+            mock_call.assert_called_once()
+            assert mock_call.call_args[1]["include_key"] == ["status", "failures"]
+
+            assert result["status"] == "Failed"
+            assert "failures" in result
+
+
+class TestGetWorkflowLogs:
+    """Test get_workflow_logs tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_logs_success(self):
+        """Test successful workflow logs retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "workflowName": "test_workflow",
+            "status": "Failed",
+            "calls": {
+                "task1": [
+                    {
+                        "stderr": "gs://bucket/logs/task1-stderr.log",
+                        "stdout": "gs://bucket/logs/task1-stdout.log",
+                        "executionStatus": "Failed",
+                        "attempt": 1,
+                        "shardIndex": -1,
+                    }
+                ],
+                "task2": [
+                    {
+                        "stderr": "gs://bucket/logs/task2-stderr.log",
+                        "stdout": "gs://bucket/logs/task2-stdout.log",
+                        "executionStatus": "Succeeded",
+                        "attempt": 1,
+                        "shardIndex": 0,
+                    }
+                ],
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
+            get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+
+            ctx = MagicMock()
+            result = await get_workflow_logs_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-456",
+                ctx=ctx,
+            )
+
+            assert result["workflow_id"] == "wf-456"
+            assert result["workflow_name"] == "test_workflow"
+            assert result["status"] == "Failed"
+            assert result["task_count"] == 2
+            assert "task1" in result["logs"]
+            assert "task2" in result["logs"]
+            assert result["logs"]["task1"]["stderr_url"] == "gs://bucket/logs/task1-stderr.log"
+            assert result["logs"]["task1"]["status"] == "Failed"
+            assert result["logs"]["task2"]["status"] == "Succeeded"

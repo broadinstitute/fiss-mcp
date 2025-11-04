@@ -12,7 +12,9 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 - **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
 - **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
-- **`get_submission_status`** - Get detailed status of workflow submissions including workflow states
+- **`get_submission_status`** - Get detailed status of workflow submissions (supports customizable workflow limits)
+- **`get_job_metadata`** - Get Cromwell metadata for specific workflows with optional filtering
+- **`get_workflow_logs`** - Get log file locations (GCS URLs) for workflow tasks
 
 ## Use Cases
 
@@ -239,9 +241,9 @@ See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 ### Phase 1: Read-Only Tools ✅
 - [x] `list_workspaces`
 - [x] `get_workspace_data_tables`
-- [x] `get_submission_status`
-- [ ] `get_job_metadata`
-- [ ] `get_submission_logs` (with tail truncation strategy)
+- [x] `get_submission_status` (with optional workflow limit)
+- [x] `get_job_metadata` (with optional metadata filtering)
+- [x] `get_workflow_logs` (returns GCS log URLs)
 
 ### Phase 2: Monitoring Tools
 - [ ] `list_submissions` (with cursor-based pagination)
