@@ -10,6 +10,9 @@ fastmcp>=0.2.0
 # Terra/FISS API Client
 firecloud>=0.16.0
 
+# Google Cloud Storage (for fetching workflow logs)
+google-cloud-storage>=2.0.0
+
 # Data validation (may be included in fastmcp)
 pydantic>=2.0.0
 

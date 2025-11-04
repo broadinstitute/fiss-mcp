@@ -438,3 +438,213 @@ class TestGetWorkflowLogs:
             assert result["logs"]["task1"]["stderr_url"] == "gs://bucket/logs/task1-stderr.log"
             assert result["logs"]["task1"]["status"] == "Failed"
             assert result["logs"]["task2"]["status"] == "Succeeded"
+            assert result["fetch_content"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_logs_with_content_fetching(self):
+        """Test workflow logs with actual content fetching from GCS"""
+        from unittest.mock import Mock
+
+        mock_metadata_response = MagicMock()
+        mock_metadata_response.status_code = 200
+        mock_metadata_response.json.return_value = {
+            "workflowName": "test_workflow",
+            "status": "Failed",
+            "calls": {
+                "task1": [
+                    {
+                        "stderr": "gs://bucket/logs/task1-stderr.log",
+                        "stdout": "gs://bucket/logs/task1-stdout.log",
+                        "executionStatus": "Failed",
+                        "attempt": 1,
+                        "shardIndex": -1,
+                    }
+                ],
+            },
+        }
+
+        # Mock GCS client
+        mock_blob = Mock()
+        mock_blob.download_as_text.return_value = "Error: Task failed\nStacktrace here..."
+        mock_bucket = Mock()
+        mock_bucket.blob.return_value = mock_blob
+        mock_storage_client = Mock()
+        mock_storage_client.bucket.return_value = mock_bucket
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response):
+            with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
+                get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+
+                ctx = MagicMock()
+                result = await get_workflow_logs_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-456",
+                    ctx=ctx,
+                    fetch_content=True,
+                    truncate=False,
+                )
+
+                # Verify content was fetched
+                assert result["fetch_content"] is True
+                assert "stderr" in result["logs"]["task1"]
+                assert "stdout" in result["logs"]["task1"]
+                assert result["logs"]["task1"]["stderr"] == "Error: Task failed\nStacktrace here..."
+                assert "stderr_truncated" not in result["logs"]["task1"]  # No truncation
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_logs_with_truncation(self):
+        """Test workflow logs with truncation applied"""
+        from unittest.mock import Mock
+
+        mock_metadata_response = MagicMock()
+        mock_metadata_response.status_code = 200
+        mock_metadata_response.json.return_value = {
+            "workflowName": "test_workflow",
+            "status": "Failed",
+            "calls": {
+                "task1": [
+                    {
+                        "stderr": "gs://bucket/logs/task1-stderr.log",
+                        "stdout": "",
+                        "executionStatus": "Failed",
+                        "attempt": 1,
+                        "shardIndex": -1,
+                    }
+                ],
+            },
+        }
+
+        # Create a large log file that will be truncated
+        large_log = "A" * 30000  # 30K characters
+
+        mock_blob = Mock()
+        mock_blob.download_as_text.return_value = large_log
+        mock_bucket = Mock()
+        mock_bucket.blob.return_value = mock_blob
+        mock_storage_client = Mock()
+        mock_storage_client.bucket.return_value = mock_bucket
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response):
+            with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
+                get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+
+                ctx = MagicMock()
+                result = await get_workflow_logs_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-456",
+                    ctx=ctx,
+                    fetch_content=True,
+                    truncate=True,
+                    max_chars=10000,
+                )
+
+                # Verify truncation occurred
+                assert result["logs"]["task1"]["stderr_truncated"] is True
+                stderr_content = result["logs"]["task1"]["stderr"]
+                assert len(stderr_content) < len(large_log)
+                assert "Truncated" in stderr_content
+                assert "Total log size: 30,000" in stderr_content
+
+
+class TestTruncationHelper:
+    """Test truncation helper function"""
+
+    def test_truncate_short_content(self):
+        """Test that short content is not truncated"""
+        from terra_mcp.server import _truncate_log_content
+
+        content = "Short log content"
+        result, was_truncated = _truncate_log_content(content, max_chars=1000)
+
+        assert result == content
+        assert was_truncated is False
+
+    def test_truncate_long_content(self):
+        """Test that long content is truncated correctly"""
+        from terra_mcp.server import _truncate_log_content
+
+        # Create content with identifiable head and tail
+        head = "START" * 1000  # 5000 chars
+        middle = "MIDDLE" * 5000  # 30000 chars
+        tail = "END" * 1000  # 3000 chars
+        content = head + middle + tail
+
+        result, was_truncated = _truncate_log_content(content, max_chars=10000)
+
+        assert was_truncated is True
+        assert "START" in result  # Head preserved
+        assert "END" in result  # Tail preserved
+        assert "Truncated" in result  # Truncation message present
+        assert len(result) <= 10100  # Approximately max_chars (with message)
+
+    def test_truncate_custom_max_chars(self):
+        """Test truncation with custom max_chars"""
+        from terra_mcp.server import _truncate_log_content
+
+        content = "X" * 100000
+        result, was_truncated = _truncate_log_content(content, max_chars=5000)
+
+        assert was_truncated is True
+        assert len(result) <= 5100  # Approximately 5000 + message
+
+
+class TestGCSLogFetching:
+    """Test GCS log fetching helper"""
+
+    def test_fetch_gcs_log_invalid_url(self):
+        """Test handling of invalid GCS URLs"""
+        from terra_mcp.server import _fetch_gcs_log
+
+        ctx = MagicMock()
+
+        # Test non-GCS URL
+        result = _fetch_gcs_log("http://example.com/log.txt", ctx)
+        assert result is None
+
+        # Test malformed GCS URL
+        result = _fetch_gcs_log("gs://bucket-only", ctx)
+        assert result is None
+
+    def test_fetch_gcs_log_success(self):
+        """Test successful GCS log fetch"""
+        from unittest.mock import Mock
+
+        from terra_mcp.server import _fetch_gcs_log
+
+        mock_blob = Mock()
+        mock_blob.download_as_text.return_value = "Log content here"
+        mock_bucket = Mock()
+        mock_bucket.blob.return_value = mock_blob
+        mock_client = Mock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
+
+            assert result == "Log content here"
+            mock_client.bucket.assert_called_once_with("my-bucket")
+            mock_bucket.blob.assert_called_once_with("path/to/log.txt")
+
+    def test_fetch_gcs_log_exception(self):
+        """Test handling of GCS fetch exceptions"""
+        from unittest.mock import Mock
+
+        from terra_mcp.server import _fetch_gcs_log
+
+        mock_client = Mock()
+        mock_client.bucket.side_effect = Exception("GCS error")
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
+
+            assert result is None
+            # Verify error was logged
+            ctx.error.assert_called()
