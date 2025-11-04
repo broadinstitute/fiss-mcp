@@ -1,5 +1,9 @@
 # Terra.Bio MCP Server
 
+[![Tests](https://github.com/broadinstitute/fiss-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/broadinstitute/fiss-mcp/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/broadinstitute/fiss-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/broadinstitute/fiss-mcp)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that enables Claude and Claude Code to interact with [Terra.Bio](https://terra.bio) workspaces via the [FISS (Firecloud) API](https://github.com/broadinstitute/fiss).
 
 ## Features
