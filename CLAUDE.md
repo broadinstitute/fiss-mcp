@@ -33,52 +33,57 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 - Default to concise responses, offer detailed option
 - Always include human-readable summaries with technical data
 
-## Implementation Phases
+## Implementation Summary
 
-### Phase 1: Read-Only Tools ✅ COMPLETED
+All planned tools have been successfully implemented following test-driven development (TDD) principles.
+
+### Workspace & Data Discovery (3 tools)
 1. ✅ `list_workspaces` - List user's accessible Terra workspaces
 2. ✅ `get_workspace_data_tables` - List data tables in a workspace
-3. ✅ `get_submission_status` - Check workflow submission status by ID
+3. ✅ `get_entities` - Read entity data from Terra data tables
+   - Returns all entities of specified type with attributes
+
+### Workflow Monitoring & Status (6 tools)
+4. ✅ `list_submissions` - List all submissions in a workspace
+   - Returns full submission metadata including status, submitter, workflows
+5. ✅ `get_submission_status` - Check workflow submission status by ID
    - Supports `max_workflows` parameter (default: 10, use 0 for all)
-4. ✅ `get_job_metadata` - Get Cromwell metadata for specific workflows
+6. ✅ `get_job_metadata` - Get Cromwell metadata for specific workflows
    - Supports `include_keys` and `exclude_keys` for filtering response
-5. ✅ `get_workflow_logs` - Fetch stderr/stdout from GCS
+7. ✅ `get_workflow_logs` - Fetch stderr/stdout from GCS
    - Returns GCS URLs by default (fast)
    - `fetch_content=True` to fetch actual log content from GCS
    - Smart truncation (first 5K + last 20K chars) by default when fetching
    - `truncate=False` for full logs when needed
    - `max_chars` parameter to customize truncation limit
-
-### Phase 2: Monitoring Tools ✅ COMPLETED
-6. ✅ `list_submissions` - List all submissions in a workspace
-   - Returns full submission metadata including status, submitter, workflows
-7. ✅ `get_workflow_outputs` - Get output files from completed workflows
+8. ✅ `get_workflow_outputs` - Get output files from completed workflows
    - Returns workflow outputs dictionary (GCS paths and scalar values)
-8. ✅ `get_workflow_cost` - Get cost information for workflows
+9. ✅ `get_workflow_cost` - Get cost information for workflows
    - Returns cost breakdown by compute, storage, network
    - Note: Cost data may be delayed (takes hours for GCP to process)
 
-### Phase 3: Workflow Management Tools
-9. `get_entities` - Read data from Terra data tables/entities
-   - Support filtering, pagination, and attribute selection
-   - Return entity metadata and attributes as structured data
-10. `get_method_config` - Get method configuration details
-   - Return WDL workflow definition and configuration
-   - Useful for verifying workflow versions match Git commits
-11. `update_method_config` - Update/modify method configuration
-   - Change workflow versions, inputs, outputs
-   - Essential for switching between Git branches during development
-12. `copy_method_config` - Duplicate method configuration to new name
-   - Copy workflow configurations within workspace
-   - Useful for creating test variants of workflows
-13. `submit_workflow` - Launch a WDL workflow
-   - Submit workflows with specified method configuration
-   - Support selecting different workflow versions
-14. `abort_submission` - Cancel a running workflow
+### Workflow Configuration & Management (5 tools)
+10. ✅ `get_method_config` - Get method configuration details
+    - Returns WDL workflow definition and configuration
+    - Useful for verifying workflow versions match Git commits
+11. ✅ `update_method_config` - Update/modify method configuration
+    - Change workflow versions, inputs, outputs
+    - Essential for switching between Git branches during development
+12. ✅ `copy_method_config` - Duplicate method configuration to new name
+    - Copy workflow configurations within workspace
+    - Useful for creating test variants of workflows
+13. ✅ `submit_workflow` - Launch a WDL workflow
+    - Submit workflows with specified method configuration
+    - Supports both single entity and batch processing via expressions
+    - Configurable call caching
+14. ✅ `abort_submission` - Cancel a running workflow
+    - Cancels all workflows in a submission
 
-### Phase 4: Data Management Tools
-15. `upload_data_to_table` - Add/update rows in Terra data tables
-   - Upload entity data for workflow inputs
+### Data Management (1 tool)
+15. ✅ `upload_entities` - Upload or update entity data in Terra data tables
+    - Validates entity format (name, entityType, attributes)
+    - Supports batch uploads of multiple entities
+    - Comprehensive error handling for invalid data
 
 ## FISS/Terra Context
 
@@ -101,36 +106,55 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 - Job metadata includes Cromwell metadata with detailed execution info
 - `fapi.get_workflow_metadata()` supports `include_key` and `exclude_key` parameters for filtering
 
-### Phase 3 API Functions
-**Entity/Table Data:**
+### FISS API Functions Used
+
+**Workspace & Discovery:**
+- `fapi.list_workspaces()` - List accessible workspaces
+- `fapi.list_entity_types(namespace, workspace)` - List data tables
 - `fapi.get_entities(namespace, workspace, etype)` - Get all entities of a type
-- `fapi.get_entities_tsv(namespace, workspace, etype, attrs=None)` - Get entities as TSV
-- `fapi.get_entity(namespace, workspace, etype, ename)` - Get single entity
-- `fapi.get_entities_query(...)` - Paginated query with filtering
 
-**Method Configurations:**
+**Workflow Monitoring:**
+- `fapi.list_submissions(namespace, workspace)` - List all submissions
+- `fapi.get_submission(namespace, workspace, submission_id)` - Get submission status
+- `fapi.get_workflow_metadata(namespace, workspace, submission_id, workflow_id, include_key, exclude_key)` - Get Cromwell metadata
+- `fapi.get_workflow_outputs(namespace, workspace, submission_id, workflow_id)` - Get workflow outputs
+- `fapi.get_workflow_cost(namespace, workspace, submission_id, workflow_id)` - Get cost information
+
+**Workflow Management:**
 - `fapi.get_workspace_config(namespace, workspace, cnamespace, config)` - Get method config details
-- `fapi.get_repository_method(namespace, method, snapshot_id)` - Get WDL from methods repo
 - `fapi.update_workspace_config(namespace, workspace, cnamespace, configname, body)` - Update method config
-- `fapi.copy_config_from_repo(...)` - Copy method config from repo to workspace
-- `fapi.validate_config(namespace, workspace, cnamespace, config)` - Validate method config
-
-**Workflow Submission:**
-- `fapi.create_submission(...)` - Submit workflow (already documented in Phase 1)
+- `fapi.copy_config_from_repo(namespace, workspace, from_cnamespace, from_config, to_cnamespace, to_config)` - Copy method config
+- `fapi.create_submission(namespace, workspace, cnamespace, config, entity_type, entity_name, expression, use_callcache)` - Submit workflow
 - `fapi.abort_submission(namespace, workspace, submission_id)` - Cancel submission
 
+**Data Management:**
+- `fapi.upload_entities(namespace, workspace, entity_data)` - Upload/update entities
+
 ## Development Notes & Learnings
+
+### Test-Driven Development (TDD)
+- All tools were implemented following TDD principles: write tests first, then implement
+- 53 total tests with 75% code coverage
+- Comprehensive test coverage includes:
+  - Success scenarios for all tools
+  - Error handling (404, 403, 400, 409 responses)
+  - Edge cases (empty data, invalid formats, truncation)
+  - Helper function tests (GCS log fetching, truncation logic)
+- Tests use mocked FISS API responses for fast, deterministic execution
+- Mock GCS client for log fetching tests to avoid external dependencies
 
 ### Testing with FastMCP
 - FastMCP uses decorators that wrap functions in `FunctionTool` objects
 - Access underlying function via `.fn` attribute: `mcp._tool_manager._tools["tool_name"].fn`
 - Always import `ToolError` from `fastmcp.exceptions`, not `fastmcp` directly
-- Test FISS connectivity early: `from firecloud import api as fapi`
+- Use `pytest.mark.asyncio` for all async tool tests
+- Mock context object (`ctx = MagicMock()`) for logging verification
 
 ### FISS Installation Quirks
 - Firecloud requires `setuptools<80` due to deprecated `package_index` (see [fiss#192](https://github.com/broadinstitute/fiss/issues/192))
 - Must use `pip install --no-build-isolation` to use local setuptools
 - Document this in requirements.txt and installation instructions
+- GitHub Actions workflow configured with proper dependency installation order
 
 ### GCS Log Fetching
 - Use `google-cloud-storage` library to fetch log content
@@ -138,16 +162,60 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 - Logs can be large (>1MB), always provide truncation options
 - Smart truncation preserves context (first 5K) and errors (last 20K)
 - Return both URLs and optional content for flexibility
+- Handle GCS fetch failures gracefully (return None, log error)
 
 ### MCP Server Design Patterns
 - Long-running workflows: Claude will need to poll status, MCP is stateless
 - Always provide sensible defaults but allow full data access when needed
 - Use `Annotated` type hints for parameter descriptions (visible to LLMs)
 - Two-tier error handling: `ToolError` for user-facing, masked exceptions for internal
-- Consider adding tool to parse/summarize Terra's call-caching information
+- Comprehensive error messages with actionable next steps
+- Validation before API calls to catch errors early
+- Consistent response formats across all tools
 
-## Future Enhancements (Post-MVP)
-- Workflow cost analysis and optimization suggestions
-- Automatic retry logic for failed jobs
-- Integration with WDL linting/validation
-- Support for Terra notebook operations
+### Code Quality & CI/CD
+- Ruff for linting and formatting (enforced in CI)
+- GitHub Actions workflow with test matrix (Python 3.10, 3.11, 3.12)
+- Codecov integration for coverage tracking
+- Formatting check prevents commits with style violations
+
+## Future Enhancements
+
+Potential areas for expansion beyond the current 15 tools:
+
+### Workflow Analysis & Optimization
+- Automatic cost optimization suggestions based on resource usage
+- Call-caching analysis and recommendations
+- Workflow performance profiling and bottleneck identification
+- Historical trend analysis for workflow execution times and costs
+
+### Enhanced Error Handling & Reliability
+- Automatic retry logic for transient API failures
+- Exponential backoff for rate limit handling
+- Batch operation support with progress tracking
+- Detailed validation of WDL inputs before submission
+
+### WDL Integration
+- WDL parsing and syntax validation
+- Integration with WDL linting tools (womtool, miniwdl)
+- WDL dependency analysis and visualization
+- Automatic WDL variable extraction for input mapping
+
+### Advanced Data Operations
+- Bulk entity operations with transaction support
+- Workspace cloning and migration tools
+- Entity query language with complex filters
+- Pagination support for large entity tables
+- TSV import/export for entity data
+
+### Terra Platform Integration
+- Terra notebook operations and management
+- Workspace data model visualization
+- Bucket management and access control
+- Billing project administration
+
+### Developer Experience
+- Interactive workflow debugging with breakpoints
+- Workflow execution replay and what-if analysis
+- Integration with IDE extensions (VS Code, PyCharm)
+- Workflow template library and scaffolding

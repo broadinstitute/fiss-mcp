@@ -6,32 +6,34 @@
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that enables Claude and Claude Code to interact with [Terra.Bio](https://terra.bio) workspaces via the [FISS (Firecloud) API](https://github.com/broadinstitute/fiss).
 
-## Features
+## Available Tools
 
-### Phase 1: Read-Only Tools ✅ COMPLETED
+This MCP server provides 15 tools for interacting with Terra.Bio workspaces:
+
+### Workspace & Data Discovery
 
 - **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
 - **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
+- **`get_entities`** - Read entity data from Terra data tables for workflow inputs
+
+### Workflow Monitoring & Status
+
+- **`list_submissions`** - List all workflow submissions in a workspace with status and metadata
 - **`get_submission_status`** - Get detailed status of workflow submissions (supports customizable workflow limits)
 - **`get_job_metadata`** - Get Cromwell metadata for specific workflows with optional filtering
 - **`get_workflow_logs`** - Get workflow logs with optional GCS content fetching and smart truncation
-
-### Phase 2: Monitoring Tools ✅ COMPLETED
-
-- **`list_submissions`** - List all workflow submissions in a workspace with status and metadata
 - **`get_workflow_outputs`** - Get output files and values from completed workflows
 - **`get_workflow_cost`** - Get cost information for workflow executions
 
-### Phase 3: Workflow Management Tools ✅ COMPLETED
+### Workflow Configuration & Management
 
-- **`get_entities`** - Read entity data from Terra data tables for workflow inputs
 - **`get_method_config`** - Get method configuration details including WDL version and input/output mappings
 - **`update_method_config`** - Update method configuration (e.g., change WDL version to match development branch)
 - **`copy_method_config`** - Create copies of method configurations for testing or development
 - **`submit_workflow`** - Launch WDL workflows for single entities or batch processing
 - **`abort_submission`** - Cancel running workflow submissions
 
-### Phase 4: Data Management Tools ✅ COMPLETED
+### Data Management
 
 - **`upload_entities`** - Upload or update entity data in Terra data tables with validation
 
@@ -203,15 +205,13 @@ PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 
 The test suite includes:
 - Server initialization verification
-- Tool registration checks (all 15 tools: 5 Phase 1 + 3 Phase 2 + 6 Phase 3 + 1 Phase 4)
+- Tool registration checks (all 15 tools)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
 - Error handling scenarios (404s, 403s, 400s, 409s, API failures, GCS errors)
 - Parameter validation (max_workflows, include_keys, fetch_content, truncate, expression, entity_data, etc.)
 - Helper function tests (truncation logic, GCS URL parsing)
-- Phase 2 tool tests (submissions listing, outputs retrieval, cost fetching)
-- Phase 3 tool tests (entities, method configs, workflow submission/abortion)
-- Phase 4 tool tests (entity data upload with validation)
+- Coverage for all tool categories: workspace discovery, monitoring, workflow management, and data management
 
 ## Development
 
@@ -232,14 +232,14 @@ fiss-mcp/
 
 ### Adding New Tools
 
-To add new tools (Phase 2 or Phase 3 from CLAUDE.md):
+To extend the server with additional Terra.Bio functionality:
 
 1. Add the tool function in `src/terra_mcp/server.py`
 2. Use the `@mcp.tool()` decorator
 3. Add comprehensive docstrings (visible to LLMs)
 4. Use `Annotated` type hints for parameter descriptions
 5. Implement two-tier error handling (ToolError for user-facing errors)
-6. Add tests in `tests/test_server.py`
+6. Add tests in `tests/test_server.py` following TDD principles
 
 Example:
 ```python
@@ -271,32 +271,16 @@ async def my_new_tool(
         raise ToolError("User-friendly error message")
 ```
 
-## Roadmap
+## Future Enhancements
 
-See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
+Potential areas for expansion (see [CLAUDE.md](CLAUDE.md) for details):
 
-### Phase 1: Read-Only Tools ✅ COMPLETED
-- [x] `list_workspaces`
-- [x] `get_workspace_data_tables`
-- [x] `get_submission_status` (with optional workflow limit)
-- [x] `get_job_metadata` (with optional metadata filtering)
-- [x] `get_workflow_logs` (with optional GCS content fetching and smart truncation)
-
-### Phase 2: Monitoring Tools ✅ COMPLETED
-- [x] `list_submissions`
-- [x] `get_workflow_outputs`
-- [x] `get_workflow_cost`
-
-### Phase 3: Workflow Management Tools ✅ COMPLETED
-- [x] `get_entities` - Read data from Terra tables
-- [x] `get_method_config` - Get method configuration/WDL
-- [x] `update_method_config` - Update method configuration
-- [x] `copy_method_config` - Duplicate method configuration
-- [x] `submit_workflow` - Launch workflows
-- [x] `abort_submission` - Cancel running workflows
-
-### Phase 4: Data Management Tools ✅ COMPLETED
-- [x] `upload_entities` - Upload entity data to Terra tables
+- **Workflow Analysis**: Automatic cost optimization suggestions, call-caching analysis
+- **Enhanced Error Handling**: Automatic retry logic for transient failures, rate limit backoff
+- **WDL Integration**: WDL parsing, validation, and linting integration
+- **Batch Operations**: Bulk entity operations, workspace cloning
+- **Terra Notebooks**: Integration with Terra notebook operations
+- **Advanced Filtering**: Enhanced entity queries with complex filters and pagination
 
 ## Architecture
 
@@ -351,13 +335,13 @@ pip install -e .
 
 ## Contributing
 
-Contributions are welcome! Areas for improvement:
+Contributions are welcome! Please ensure:
 
-- Additional Phase 2 and Phase 3 tools (see CLAUDE.md)
-- Enhanced error handling and retry logic
-- WDL parsing and validation integration
-- Workflow cost analysis tools
-- Call-caching information parsing
+- Follow the established code patterns and architecture
+- Write tests before implementing features (TDD)
+- Maintain comprehensive error handling
+- Add clear documentation for LLM consumption
+- Run tests and linting before submitting PRs
 
 ## License
 
