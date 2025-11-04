@@ -4,7 +4,7 @@ Basic test suite to verify server initialization, tool registration,
 and error handling with mocked FISS API calls.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
