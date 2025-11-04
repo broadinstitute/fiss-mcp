@@ -61,11 +61,12 @@ class TestListWorkspaces:
         ]
 
         with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
-            from terra_mcp.server import list_workspaces
+            # Access the underlying function from the FunctionTool wrapper
+            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"]._fn
 
             # Create mock context
             ctx = MagicMock()
-            result = await list_workspaces(ctx)
+            result = await list_workspaces_fn(ctx)
 
             # Verify result structure
             assert len(result) == 2
@@ -85,13 +86,14 @@ class TestListWorkspaces:
         mock_response.text = "Internal Server Error"
 
         with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
-            from terra_mcp.server import list_workspaces
+            # Access the underlying function from the FunctionTool wrapper
+            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"]._fn
 
             ctx = MagicMock()
 
             # Should raise ToolError with actionable message
             with pytest.raises(ToolError) as exc_info:
-                await list_workspaces(ctx)
+                await list_workspaces_fn(ctx)
 
             assert "Failed to fetch workspaces" in str(exc_info.value)
             assert "500" in str(exc_info.value)
@@ -111,10 +113,11 @@ class TestGetWorkspaceDataTables:
         ]
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
-            from terra_mcp.server import get_workspace_data_tables
+            # Access the underlying function from the FunctionTool wrapper
+            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"]._fn
 
             ctx = MagicMock()
-            result = await get_workspace_data_tables(
+            result = await get_workspace_data_tables_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 ctx=ctx,
@@ -136,12 +139,13 @@ class TestGetWorkspaceDataTables:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
-            from terra_mcp.server import get_workspace_data_tables
+            # Access the underlying function from the FunctionTool wrapper
+            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"]._fn
 
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
-                await get_workspace_data_tables(
+                await get_workspace_data_tables_fn(
                     workspace_namespace="nonexistent",
                     workspace_name="workspace",
                     ctx=ctx,
@@ -160,12 +164,13 @@ class TestGetWorkspaceDataTables:
         mock_response.status_code = 403
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
-            from terra_mcp.server import get_workspace_data_tables
+            # Access the underlying function from the FunctionTool wrapper
+            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"]._fn
 
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
-                await get_workspace_data_tables(
+                await get_workspace_data_tables_fn(
                     workspace_namespace="restricted",
                     workspace_name="workspace",
                     ctx=ctx,
@@ -194,10 +199,11 @@ class TestGetSubmissionStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
-            from terra_mcp.server import get_submission_status
+            # Access the underlying function from the FunctionTool wrapper
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"]._fn
 
             ctx = MagicMock()
-            result = await get_submission_status(
+            result = await get_submission_status_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 submission_id="abc-123",
@@ -224,10 +230,11 @@ class TestGetSubmissionStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
-            from terra_mcp.server import get_submission_status
+            # Access the underlying function from the FunctionTool wrapper
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"]._fn
 
             ctx = MagicMock()
-            result = await get_submission_status(
+            result = await get_submission_status_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 submission_id="abc-123",
@@ -249,12 +256,13 @@ class TestGetSubmissionStatus:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
-            from terra_mcp.server import get_submission_status
+            # Access the underlying function from the FunctionTool wrapper
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"]._fn
 
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
-                await get_submission_status(
+                await get_submission_status_fn(
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     submission_id="nonexistent",
