@@ -46,22 +46,20 @@ cd fiss-mcp
 # Install setuptools<80 first (required for firecloud)
 pip install "setuptools<80"
 
-# Install firecloud with --no-build-isolation
-pip install --no-build-isolation firecloud>=0.16.0
-
-# Install remaining dependencies
-pip install fastmcp>=0.2.0 pydantic>=2.0.0
+# Install all dependencies with --no-build-isolation
+pip install --no-build-isolation -r requirements.txt
 ```
 
-Or use the requirements file (which includes setuptools):
+For development (includes test dependencies):
 ```bash
-pip install -r requirements.txt
-```
-
-Or install in development mode:
-```bash
+# Install setuptools<80 first (required for firecloud)
 pip install "setuptools<80"
-pip install --no-build-isolation -e ".[dev]"
+
+# Install all dependencies with --no-build-isolation
+pip install --no-build-isolation -r requirements.txt
+
+# Install additional test/development dependencies
+pip install pytest-cov ruff
 ```
 
 3. Verify your Google credentials are configured for FISS:
@@ -160,21 +158,24 @@ Submission abc-123-def is currently Running with 10 workflows:
 Run the test suite to verify the server implementation:
 
 ```bash
-# Install test dependencies
-pip install -e ".[dev]"
+# Install dependencies (if not already installed)
+pip install "setuptools<80"
+pip install --no-build-isolation -r requirements.txt
+pip install pytest-cov
 
 # Run tests
-pytest tests/
+PYTHONPATH=src pytest tests/ -v
 
 # Run with coverage
-pytest --cov=src/terra_mcp tests/
+PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 ```
 
 The test suite includes:
 - Server initialization verification
-- Tool registration checks
+- Tool registration checks (all 5 Phase 1 tools)
 - Mocked FISS API responses
 - Error handling scenarios (404s, 403s, API failures)
+- Parameter validation (max_workflows, include_keys, etc.)
 
 ## Development
 
