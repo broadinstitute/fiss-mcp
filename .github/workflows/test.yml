@@ -25,10 +25,11 @@ jobs:
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip setuptools wheel
-        # Install firecloud separately with legacy setuptools support
-        pip install "setuptools<75" --force-reinstall
-        pip install firecloud>=0.16.0
+        python -m pip install --upgrade pip
+        # Install setuptools<80 to support firecloud (see broadinstitute/fiss#192)
+        pip install "setuptools<80"
+        # Install firecloud with --no-build-isolation to use local setuptools
+        pip install --no-build-isolation firecloud>=0.16.0
         # Install other dependencies
         pip install fastmcp>=0.2.0 pydantic>=2.0.0
         pip install pytest pytest-asyncio pytest-cov
