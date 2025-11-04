@@ -20,7 +20,7 @@ class TestServerInitialization:
         assert mcp.name == "Terra.Bio MCP Server"
 
     def test_server_has_tools(self):
-        """Verify all Phase 1 tools are registered"""
+        """Verify all Phase 1 and Phase 2 tools are registered"""
         # Get registered tools via MCP's internal registry
         # Note: FastMCP uses decorators to register tools
         tools = mcp._tool_manager._tools
@@ -32,6 +32,11 @@ class TestServerInitialization:
         assert "get_submission_status" in tool_names
         assert "get_job_metadata" in tool_names
         assert "get_workflow_logs" in tool_names
+
+        # Verify all Phase 2 tools are present
+        assert "list_submissions" in tool_names
+        assert "get_workflow_outputs" in tool_names
+        assert "get_workflow_cost" in tool_names
 
 
 class TestListWorkspaces:
@@ -552,6 +557,319 @@ class TestGetWorkflowLogs:
                 assert len(stderr_content) < len(large_log)
                 assert "Truncated" in stderr_content
                 assert "Total log size: 30,000" in stderr_content
+
+
+class TestListSubmissions:
+    """Test list_submissions tool"""
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_success(self):
+        """Test successful submission listing"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "submissionId": "sub-123",
+                "status": "Succeeded",
+                "submissionDate": "2024-01-01T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [{"workflowId": "wf-1", "status": "Succeeded"}],
+            },
+            {
+                "submissionId": "sub-456",
+                "status": "Running",
+                "submissionDate": "2024-01-02T14:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "AnotherWorkflow",
+                "workflows": [
+                    {"workflowId": "wf-2", "status": "Running"},
+                    {"workflowId": "wf-3", "status": "Succeeded"},
+                ],
+            },
+        ]
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+            )
+
+            assert len(result) == 2
+            assert result[0]["submissionId"] == "sub-123"
+            assert result[0]["status"] == "Succeeded"
+            assert result[1]["submissionId"] == "sub-456"
+            assert result[1]["status"] == "Running"
+            assert len(result[1]["workflows"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_workspace_not_found(self):
+        """Test handling of non-existent workspace"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await list_submissions_fn(
+                    workspace_namespace="nonexistent",
+                    workspace_name="workspace",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+            assert "nonexistent/workspace" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_access_denied(self):
+        """Test handling of permission errors"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await list_submissions_fn(
+                    workspace_namespace="restricted",
+                    workspace_name="workspace",
+                    ctx=ctx,
+                )
+
+            assert "Access denied" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_empty_workspace(self):
+        """Test workspace with no submissions"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = []
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="empty-ws",
+                ctx=ctx,
+            )
+
+            assert result == []
+            assert len(result) == 0
+
+
+class TestGetWorkflowOutputs:
+    """Test get_workflow_outputs tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_outputs_success(self):
+        """Test successful workflow outputs retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "wf-123",
+            "outputs": {
+                "MyWorkflow.output_file": "gs://bucket/outputs/result.bam",
+                "MyWorkflow.output_index": "gs://bucket/outputs/result.bam.bai",
+                "MyWorkflow.metrics": {"quality_score": 95.5, "read_count": 1000000},
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
+            get_workflow_outputs_fn = mcp._tool_manager._tools["get_workflow_outputs"].fn
+
+            ctx = MagicMock()
+            result = await get_workflow_outputs_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-123",
+                ctx=ctx,
+            )
+
+            assert result["id"] == "wf-123"
+            assert "outputs" in result
+            assert "MyWorkflow.output_file" in result["outputs"]
+            assert result["outputs"]["MyWorkflow.output_file"] == "gs://bucket/outputs/result.bam"
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_outputs_not_found(self):
+        """Test handling of non-existent workflow"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
+            get_workflow_outputs_fn = mcp._tool_manager._tools["get_workflow_outputs"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workflow_outputs_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="nonexistent",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+            assert "nonexistent" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_outputs_access_denied(self):
+        """Test handling of permission errors"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+
+        with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
+            get_workflow_outputs_fn = mcp._tool_manager._tools["get_workflow_outputs"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workflow_outputs_fn(
+                    workspace_namespace="restricted",
+                    workspace_name="workspace",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    ctx=ctx,
+                )
+
+            assert "Access denied" in str(exc_info.value)
+
+
+class TestGetWorkflowCost:
+    """Test get_workflow_cost tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_cost_success(self):
+        """Test successful workflow cost retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "cost": 2.45,
+            "currency": "USD",
+            "costBreakdown": {
+                "compute": 2.00,
+                "storage": 0.35,
+                "network": 0.10,
+            },
+            "status": "complete",
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
+            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+
+            ctx = MagicMock()
+            result = await get_workflow_cost_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-123",
+                ctx=ctx,
+            )
+
+            assert result["cost"] == 2.45
+            assert result["currency"] == "USD"
+            assert "costBreakdown" in result
+            assert result["costBreakdown"]["compute"] == 2.00
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_cost_pending(self):
+        """Test workflow cost when calculation is still pending"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "cost": None,
+            "currency": "USD",
+            "status": "pending",
+            "message": "Cost calculation in progress",
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
+            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+
+            ctx = MagicMock()
+            result = await get_workflow_cost_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-123",
+                ctx=ctx,
+            )
+
+            assert result["status"] == "pending"
+            assert result["cost"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_cost_not_found(self):
+        """Test handling of non-existent workflow"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
+            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workflow_cost_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="nonexistent",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+            assert "nonexistent" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_cost_access_denied(self):
+        """Test handling of permission errors"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+
+        with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
+            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workflow_cost_fn(
+                    workspace_namespace="restricted",
+                    workspace_name="workspace",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    ctx=ctx,
+                )
+
+            assert "Access denied" in str(exc_info.value)
 
 
 class TestTruncationHelper:

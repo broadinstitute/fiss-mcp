@@ -49,10 +49,14 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
    - `truncate=False` for full logs when needed
    - `max_chars` parameter to customize truncation limit
 
-### Phase 2: Monitoring Tools
-6. `list_submissions` - List submissions with filtering by status/date
-7. `get_workflow_outputs` - Get output files from completed workflows
-8. `get_workflow_cost` - Get cost information if available
+### Phase 2: Monitoring Tools ✅ COMPLETED
+6. ✅ `list_submissions` - List all submissions in a workspace
+   - Returns full submission metadata including status, submitter, workflows
+7. ✅ `get_workflow_outputs` - Get output files from completed workflows
+   - Returns workflow outputs dictionary (GCS paths and scalar values)
+8. ✅ `get_workflow_cost` - Get cost information for workflows
+   - Returns cost breakdown by compute, storage, network
+   - Note: Cost data may be delayed (takes hours for GCP to process)
 
 ### Phase 3: Write Operations (After read-only tools validated)
 9. `upload_data_to_table` - Add/update rows in Terra data tables

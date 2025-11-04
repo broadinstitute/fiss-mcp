@@ -551,6 +551,228 @@ async def get_workflow_logs(
         )
 
 
+# ===== Phase 2: Monitoring Tools =====
+
+
+@mcp.tool()
+async def list_submissions(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    ctx: Context,
+) -> list[dict[str, Any]]:
+    """List all workflow submissions in a Terra workspace.
+
+    Returns a list of all submissions in the workspace with their status and metadata.
+    Use this to find submission IDs for detailed analysis with get_submission_status.
+
+    Each submission represents one or more workflow executions launched together.
+    Common workflow to get submission details:
+    1. Use list_submissions to find submissions in a workspace
+    2. Use get_submission_status to get detailed status for a specific submission
+    3. Use get_workflow_logs to debug failed workflows
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+
+    Returns:
+        List of submission dictionaries containing:
+        - submissionId: Unique identifier for the submission
+        - status: Current status (Submitted, Running, Succeeded, Failed, Aborted)
+        - submissionDate: When the submission was created
+        - submitter: Email of the user who submitted
+        - methodConfigurationName: Name of the workflow configuration used
+        - workflows: Array of workflow details (IDs and statuses)
+    """
+    try:
+        ctx.info(f"Listing submissions for workspace {workspace_namespace}/{workspace_name}")
+
+        response = fapi.list_submissions(workspace_namespace, workspace_name)
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workspace '{workspace_namespace}/{workspace_name}' not found. "
+                "Please verify the workspace namespace and name are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this workspace."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to list submissions (HTTP {response.status_code}). "
+                "Please check the workspace exists and you have access."
+            )
+
+        submissions = response.json()
+        ctx.info(
+            f"Successfully retrieved {len(submissions)} submissions from "
+            f"{workspace_namespace}/{workspace_name}"
+        )
+
+        return submissions
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error listing submissions: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to list submissions for workspace {workspace_namespace}/{workspace_name}"
+        )
+
+
+@mcp.tool()
+async def get_workflow_outputs(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    submission_id: Annotated[str, "Submission identifier (UUID)"],
+    workflow_id: Annotated[str, "Workflow identifier (UUID)"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Get the output files and values from a completed workflow.
+
+    Returns the outputs produced by a workflow execution, including file paths (typically
+    Google Cloud Storage URLs) and scalar values. This is useful for retrieving results
+    after successful workflow completion.
+
+    Common use cases:
+    - Retrieve output file locations for downstream analysis
+    - Verify workflow produced expected outputs
+    - Get workflow result values for validation
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        submission_id: The submission UUID containing this workflow
+        workflow_id: The workflow UUID to get outputs for
+
+    Returns:
+        Dictionary containing workflow outputs. Structure depends on the WDL workflow
+        definition but typically includes:
+        - outputs: Dictionary mapping output variable names to their values/paths
+        - id: Workflow identifier
+        - tasks: Task-level outputs (if available)
+    """
+    try:
+        ctx.info(f"Fetching outputs for workflow {workflow_id} in submission {submission_id}")
+
+        response = fapi.get_workflow_outputs(
+            workspace_namespace,
+            workspace_name,
+            submission_id,
+            workflow_id,
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workflow '{workflow_id}' not found in submission '{submission_id}' "
+                f"for workspace '{workspace_namespace}/{workspace_name}'. "
+                "Please verify the workflow ID and submission ID are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this workflow."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to fetch workflow outputs (HTTP {response.status_code}). "
+                "Please check the workspace and workflow IDs."
+            )
+
+        outputs = response.json()
+        ctx.info(f"Successfully retrieved outputs for workflow {workflow_id}")
+
+        return outputs
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error fetching workflow outputs: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to fetch outputs for workflow {workflow_id} in submission {submission_id}"
+        )
+
+
+@mcp.tool()
+async def get_workflow_cost(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    submission_id: Annotated[str, "Submission identifier (UUID)"],
+    workflow_id: Annotated[str, "Workflow identifier (UUID)"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Get cost information for a workflow execution.
+
+    Returns the compute cost for a workflow run. Cost is typically calculated based on
+    VM usage, storage, and other Google Cloud Platform resources consumed during execution.
+
+    Note: Cost information may not be immediately available after workflow completion.
+    It can take several hours for GCP to process and report final costs.
+
+    Common use cases:
+    - Track workflow execution costs for budgeting
+    - Compare costs across different workflow configurations
+    - Optimize resource usage based on cost analysis
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        submission_id: The submission UUID containing this workflow
+        workflow_id: The workflow UUID to get cost for
+
+    Returns:
+        Dictionary containing cost information. Typical structure:
+        - cost: Estimated cost in USD
+        - currency: Currency code (usually "USD")
+        - costBreakdown: Detailed breakdown by task or resource type (if available)
+        - status: Whether cost calculation is complete or pending
+    """
+    try:
+        ctx.info(f"Fetching cost for workflow {workflow_id} in submission {submission_id}")
+
+        response = fapi.get_workflow_cost(
+            workspace_namespace,
+            workspace_name,
+            submission_id,
+            workflow_id,
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workflow '{workflow_id}' not found in submission '{submission_id}' "
+                f"for workspace '{workspace_namespace}/{workspace_name}'. "
+                "Please verify the workflow ID and submission ID are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this workflow."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to fetch workflow cost (HTTP {response.status_code}). "
+                "Please check the workspace and workflow IDs."
+            )
+
+        cost_data = response.json()
+        ctx.info(f"Successfully retrieved cost information for workflow {workflow_id}")
+
+        return cost_data
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error fetching workflow cost: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to fetch cost for workflow {workflow_id} in submission {submission_id}"
+        )
+
+
 # ===== Server Entry Point =====
 
 

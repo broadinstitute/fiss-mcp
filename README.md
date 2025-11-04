@@ -8,13 +8,19 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 ## Features
 
-### Phase 1: Read-Only Tools (Current)
+### Phase 1: Read-Only Tools ✅ COMPLETED
 
 - **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
 - **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
 - **`get_submission_status`** - Get detailed status of workflow submissions (supports customizable workflow limits)
 - **`get_job_metadata`** - Get Cromwell metadata for specific workflows with optional filtering
 - **`get_workflow_logs`** - Get workflow logs with optional GCS content fetching and smart truncation
+
+### Phase 2: Monitoring Tools ✅ COMPLETED
+
+- **`list_submissions`** - List all workflow submissions in a workspace with status and metadata
+- **`get_workflow_outputs`** - Get output files and values from completed workflows
+- **`get_workflow_cost`** - Get cost information for workflow executions
 
 ## Use Cases
 
@@ -184,12 +190,13 @@ PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 
 The test suite includes:
 - Server initialization verification
-- Tool registration checks (all 5 Phase 1 tools)
+- Tool registration checks (all 8 tools: 5 Phase 1 + 3 Phase 2)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
 - Error handling scenarios (404s, 403s, API failures, GCS errors)
 - Parameter validation (max_workflows, include_keys, fetch_content, truncate, etc.)
 - Helper function tests (truncation logic, GCS URL parsing)
+- Phase 2 tool tests (submissions listing, outputs retrieval, cost fetching)
 
 ## Development
 
@@ -260,10 +267,10 @@ See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 - [x] `get_job_metadata` (with optional metadata filtering)
 - [x] `get_workflow_logs` (with optional GCS content fetching and smart truncation)
 
-### Phase 2: Monitoring Tools
-- [ ] `list_submissions` (with cursor-based pagination)
-- [ ] `get_workflow_outputs`
-- [ ] `get_workflow_cost`
+### Phase 2: Monitoring Tools ✅ COMPLETED
+- [x] `list_submissions`
+- [x] `get_workflow_outputs`
+- [x] `get_workflow_cost`
 
 ### Phase 3: Write Operations
 - [ ] `upload_data_to_table`
