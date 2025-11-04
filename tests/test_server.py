@@ -20,7 +20,7 @@ class TestServerInitialization:
         assert mcp.name == "Terra.Bio MCP Server"
 
     def test_server_has_tools(self):
-        """Verify all Phase 1 and Phase 2 tools are registered"""
+        """Verify all Phase 1, Phase 2, and Phase 3 tools are registered"""
         # Get registered tools via MCP's internal registry
         # Note: FastMCP uses decorators to register tools
         tools = mcp._tool_manager._tools
@@ -37,6 +37,14 @@ class TestServerInitialization:
         assert "list_submissions" in tool_names
         assert "get_workflow_outputs" in tool_names
         assert "get_workflow_cost" in tool_names
+
+        # Verify all Phase 3 tools are present
+        assert "get_entities" in tool_names
+        assert "get_method_config" in tool_names
+        assert "update_method_config" in tool_names
+        assert "copy_method_config" in tool_names
+        assert "submit_workflow" in tool_names
+        assert "abort_submission" in tool_names
 
 
 class TestListWorkspaces:
@@ -970,3 +978,448 @@ class TestGCSLogFetching:
             assert result is None
             # Verify error was logged
             ctx.error.assert_called()
+
+
+# ===== Phase 3: Workflow Management Tools Tests =====
+
+
+class TestGetEntities:
+    """Test get_entities tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_entities_success(self):
+        """Test successful entity retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "name": "sample_1",
+                "entityType": "sample",
+                "attributes": {
+                    "sample_id": "S001",
+                    "participant": "P001",
+                    "tissue_type": "blood",
+                },
+            },
+            {
+                "name": "sample_2",
+                "entityType": "sample",
+                "attributes": {
+                    "sample_id": "S002",
+                    "participant": "P002",
+                    "tissue_type": "tumor",
+                },
+            },
+        ]
+
+        with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
+            get_entities_fn = mcp._tool_manager._tools["get_entities"].fn
+
+            ctx = MagicMock()
+            result = await get_entities_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_type="sample",
+                ctx=ctx,
+            )
+
+            assert len(result["entities"]) == 2
+            assert result["entity_type"] == "sample"
+            assert result["count"] == 2
+            assert result["entities"][0]["name"] == "sample_1"
+            assert result["entities"][0]["attributes"]["sample_id"] == "S001"
+
+    @pytest.mark.asyncio
+    async def test_get_entities_workspace_not_found(self):
+        """Test handling of non-existent workspace"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
+            get_entities_fn = mcp._tool_manager._tools["get_entities"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_entities_fn(
+                    workspace_namespace="nonexistent",
+                    workspace_name="workspace",
+                    entity_type="sample",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_get_entities_empty_table(self):
+        """Test workspace with no entities of given type"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = []
+
+        with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
+            get_entities_fn = mcp._tool_manager._tools["get_entities"].fn
+
+            ctx = MagicMock()
+            result = await get_entities_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_type="participant",
+                ctx=ctx,
+            )
+
+            assert result["count"] == 0
+            assert result["entities"] == []
+
+
+class TestGetMethodConfig:
+    """Test get_method_config tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_method_config_success(self):
+        """Test successful method config retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "namespace": "broad-dsde-methods",
+            "name": "my_workflow",
+            "rootEntityType": "sample",
+            "methodRepoMethod": {
+                "methodNamespace": "broad",
+                "methodName": "MyWorkflow",
+                "methodVersion": 5,
+            },
+            "inputs": {
+                "MyWorkflow.input_bam": "this.bam_file",
+                "MyWorkflow.reference": "workspace.reference_genome",
+            },
+            "outputs": {
+                "MyWorkflow.output_vcf": "this.output_vcf",
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workspace_config", return_value=mock_response):
+            get_method_config_fn = mcp._tool_manager._tools["get_method_config"].fn
+
+            ctx = MagicMock()
+            result = await get_method_config_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                config_namespace="broad-dsde-methods",
+                config_name="my_workflow",
+                ctx=ctx,
+            )
+
+            assert result["name"] == "my_workflow"
+            assert result["rootEntityType"] == "sample"
+            assert result["methodRepoMethod"]["methodVersion"] == 5
+            assert "MyWorkflow.input_bam" in result["inputs"]
+
+    @pytest.mark.asyncio
+    async def test_get_method_config_not_found(self):
+        """Test handling of non-existent method config"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.get_workspace_config", return_value=mock_response):
+            get_method_config_fn = mcp._tool_manager._tools["get_method_config"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_method_config_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    config_namespace="broad",
+                    config_name="nonexistent",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+
+
+class TestUpdateMethodConfig:
+    """Test update_method_config tool"""
+
+    @pytest.mark.asyncio
+    async def test_update_method_config_success(self):
+        """Test successful method config update"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "namespace": "broad-dsde-methods",
+            "name": "my_workflow",
+            "methodRepoMethod": {"methodVersion": 6},
+        }
+
+        update_body = {
+            "methodRepoMethod": {
+                "methodNamespace": "broad",
+                "methodName": "MyWorkflow",
+                "methodVersion": 6,
+            }
+        }
+
+        with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
+            update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+
+            ctx = MagicMock()
+            result = await update_method_config_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                config_namespace="broad-dsde-methods",
+                config_name="my_workflow",
+                updates=update_body,
+                ctx=ctx,
+            )
+
+            assert result["methodRepoMethod"]["methodVersion"] == 6
+
+    @pytest.mark.asyncio
+    async def test_update_method_config_not_found(self):
+        """Test handling of non-existent method config"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
+            update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await update_method_config_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    config_namespace="broad",
+                    config_name="nonexistent",
+                    updates={"methodRepoMethod": {"methodVersion": 6}},
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+
+
+class TestCopyMethodConfig:
+    """Test copy_method_config tool"""
+
+    @pytest.mark.asyncio
+    async def test_copy_method_config_success(self):
+        """Test successful method config copy"""
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "namespace": "broad-dsde-methods",
+            "name": "my_workflow_copy",
+            "rootEntityType": "sample",
+        }
+
+        with patch("terra_mcp.server.fapi.copy_config_from_repo", return_value=mock_response):
+            copy_method_config_fn = mcp._tool_manager._tools["copy_method_config"].fn
+
+            ctx = MagicMock()
+            result = await copy_method_config_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                from_config_namespace="broad-dsde-methods",
+                from_config_name="my_workflow",
+                to_config_namespace="broad-dsde-methods",
+                to_config_name="my_workflow_copy",
+                ctx=ctx,
+            )
+
+            assert result["name"] == "my_workflow_copy"
+
+    @pytest.mark.asyncio
+    async def test_copy_method_config_source_not_found(self):
+        """Test handling of non-existent source config"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.copy_config_from_repo", return_value=mock_response):
+            copy_method_config_fn = mcp._tool_manager._tools["copy_method_config"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await copy_method_config_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    from_config_namespace="broad",
+                    from_config_name="nonexistent",
+                    to_config_namespace="broad",
+                    to_config_name="copy",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg or "Failed to copy" in error_msg
+
+
+class TestSubmitWorkflow:
+    """Test submit_workflow tool"""
+
+    @pytest.mark.asyncio
+    async def test_submit_workflow_success(self):
+        """Test successful workflow submission"""
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "submissionId": "new-sub-123",
+            "status": "Submitted",
+            "submissionDate": "2024-01-01T10:00:00Z",
+        }
+
+        with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
+            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+
+            ctx = MagicMock()
+            result = await submit_workflow_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                config_namespace="broad-dsde-methods",
+                config_name="my_workflow",
+                entity_type="sample",
+                entity_name="sample_1",
+                ctx=ctx,
+            )
+
+            assert result["submissionId"] == "new-sub-123"
+            assert result["status"] == "Submitted"
+
+    @pytest.mark.asyncio
+    async def test_submit_workflow_config_not_found(self):
+        """Test handling of non-existent method config"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
+            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await submit_workflow_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    config_namespace="broad",
+                    config_name="nonexistent",
+                    entity_type="sample",
+                    entity_name="sample_1",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg or "Failed to submit" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_submit_workflow_with_expression(self):
+        """Test workflow submission with entity expression"""
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "submissionId": "new-sub-456",
+            "status": "Submitted",
+        }
+
+        with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
+            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+
+            ctx = MagicMock()
+            result = await submit_workflow_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                config_namespace="broad-dsde-methods",
+                config_name="my_workflow",
+                entity_type="sample_set",
+                entity_name=None,
+                expression="this.samples",
+                ctx=ctx,
+            )
+
+            assert result["submissionId"] == "new-sub-456"
+
+
+class TestAbortSubmission:
+    """Test abort_submission tool"""
+
+    @pytest.mark.asyncio
+    async def test_abort_submission_success(self):
+        """Test successful submission abort"""
+        mock_response = MagicMock()
+        mock_response.status_code = 204  # No content - successful abort
+
+        with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
+            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+
+            ctx = MagicMock()
+            result = await abort_submission_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                ctx=ctx,
+            )
+
+            assert result["submission_id"] == "sub-123"
+            assert result["status"] == "abort_requested"
+
+    @pytest.mark.asyncio
+    async def test_abort_submission_not_found(self):
+        """Test handling of non-existent submission"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
+            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await abort_submission_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="nonexistent",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_abort_submission_already_completed(self):
+        """Test aborting already completed submission"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = "Submission already completed"
+
+        with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
+            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await abort_submission_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="completed-sub",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "Failed to abort" in error_msg or "400" in error_msg

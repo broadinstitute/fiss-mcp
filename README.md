@@ -22,6 +22,15 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 - **`get_workflow_outputs`** - Get output files and values from completed workflows
 - **`get_workflow_cost`** - Get cost information for workflow executions
 
+### Phase 3: Workflow Management Tools ✅ COMPLETED
+
+- **`get_entities`** - Read entity data from Terra data tables for workflow inputs
+- **`get_method_config`** - Get method configuration details including WDL version and input/output mappings
+- **`update_method_config`** - Update method configuration (e.g., change WDL version to match development branch)
+- **`copy_method_config`** - Create copies of method configurations for testing or development
+- **`submit_workflow`** - Launch WDL workflows for single entities or batch processing
+- **`abort_submission`** - Cancel running workflow submissions
+
 ## Use Cases
 
 - **WDL Pipeline Development**: Monitor Terra workflow runs while developing and debugging WDL pipelines with Claude Code
@@ -190,13 +199,14 @@ PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 
 The test suite includes:
 - Server initialization verification
-- Tool registration checks (all 8 tools: 5 Phase 1 + 3 Phase 2)
+- Tool registration checks (all 14 tools: 5 Phase 1 + 3 Phase 2 + 6 Phase 3)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
-- Error handling scenarios (404s, 403s, API failures, GCS errors)
-- Parameter validation (max_workflows, include_keys, fetch_content, truncate, etc.)
+- Error handling scenarios (404s, 403s, 400s, 409s, API failures, GCS errors)
+- Parameter validation (max_workflows, include_keys, fetch_content, truncate, expression, etc.)
 - Helper function tests (truncation logic, GCS URL parsing)
 - Phase 2 tool tests (submissions listing, outputs retrieval, cost fetching)
+- Phase 3 tool tests (entities, method configs, workflow submission/abortion)
 
 ## Development
 
@@ -272,13 +282,13 @@ See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 - [x] `get_workflow_outputs`
 - [x] `get_workflow_cost`
 
-### Phase 3: Workflow Management Tools
-- [ ] `get_entities` - Read data from Terra tables
-- [ ] `get_method_config` - Get method configuration/WDL
-- [ ] `update_method_config` - Update method configuration
-- [ ] `copy_method_config` - Duplicate method configuration
-- [ ] `submit_workflow` - Launch workflows
-- [ ] `abort_submission` - Cancel running workflows
+### Phase 3: Workflow Management Tools ✅ COMPLETED
+- [x] `get_entities` - Read data from Terra tables
+- [x] `get_method_config` - Get method configuration/WDL
+- [x] `update_method_config` - Update method configuration
+- [x] `copy_method_config` - Duplicate method configuration
+- [x] `submit_workflow` - Launch workflows
+- [x] `abort_submission` - Cancel running workflows
 
 ### Phase 4: Data Management Tools
 - [ ] `upload_data_to_table` - Upload entity data

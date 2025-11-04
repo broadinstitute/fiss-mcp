@@ -773,6 +773,510 @@ async def get_workflow_cost(
         )
 
 
+# ===== Phase 3: Workflow Management Tools =====
+
+
+@mcp.tool()
+async def get_entities(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    entity_type: Annotated[str, "Entity type to retrieve (e.g., 'sample', 'participant')"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Get all entities of a specific type from a Terra data table.
+
+    Entities represent rows in Terra data tables and are used as workflow inputs.
+    This tool retrieves all entities of a given type along with their attributes.
+
+    Common use cases:
+    - Retrieve sample/participant data for workflow submission
+    - Verify entity attributes before launching workflows
+    - Inspect data table contents
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        entity_type: The entity type to retrieve (matches data table name)
+
+    Returns:
+        Dictionary containing:
+        - entity_type: The entity type requested
+        - count: Number of entities returned
+        - entities: List of entity objects with name, entityType, and attributes
+    """
+    try:
+        ctx.info(
+            f"Fetching entities of type '{entity_type}' from workspace "
+            f"{workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.get_entities(workspace_namespace, workspace_name, entity_type)
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workspace '{workspace_namespace}/{workspace_name}' or entity type "
+                f"'{entity_type}' not found. Please verify the workspace and entity type are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this workspace."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to fetch entities (HTTP {response.status_code}). "
+                "Please check the workspace and entity type."
+            )
+
+        entities = response.json()
+        ctx.info(f"Successfully retrieved {len(entities)} entities of type '{entity_type}'")
+
+        return {
+            "entity_type": entity_type,
+            "count": len(entities),
+            "entities": entities,
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error fetching entities: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to fetch entities of type '{entity_type}' from workspace "
+            f"{workspace_namespace}/{workspace_name}"
+        )
+
+
+@mcp.tool()
+async def get_method_config(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    config_namespace: Annotated[str, "Method configuration namespace"],
+    config_name: Annotated[str, "Method configuration name"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Get a method configuration from a Terra workspace.
+
+    Method configurations define how WDL workflows are executed, including:
+    - Which WDL version/snapshot to use
+    - Input mappings (linking WDL inputs to entity attributes or workspace data)
+    - Output mappings (where to store WDL outputs)
+    - Root entity type (what type of entities this workflow operates on)
+
+    This is useful for:
+    - Verifying the correct WDL version is configured before submission
+    - Inspecting input/output mappings
+    - Understanding workflow configuration before launching jobs
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        config_namespace: The namespace of the method configuration
+        config_name: The name of the method configuration
+
+    Returns:
+        Dictionary containing method configuration details:
+        - namespace: Configuration namespace
+        - name: Configuration name
+        - rootEntityType: Entity type this workflow operates on
+        - methodRepoMethod: Details about the WDL method (namespace, name, version)
+        - inputs: Input mappings (WDL input -> entity attribute)
+        - outputs: Output mappings (WDL output -> entity attribute)
+    """
+    try:
+        ctx.info(
+            f"Fetching method configuration '{config_namespace}/{config_name}' "
+            f"from workspace {workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.get_workspace_config(
+            workspace_namespace, workspace_name, config_namespace, config_name
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Method configuration '{config_namespace}/{config_name}' not found in "
+                f"workspace '{workspace_namespace}/{workspace_name}'. "
+                "Please verify the configuration namespace and name are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this configuration."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to fetch method configuration (HTTP {response.status_code}). "
+                "Please check the workspace and configuration names."
+            )
+
+        config = response.json()
+        ctx.info(
+            f"Successfully retrieved method configuration '{config_name}' "
+            f"(WDL version: {config.get('methodRepoMethod', {}).get('methodVersion', 'unknown')})"
+        )
+
+        return config
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error fetching method configuration: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to fetch method configuration '{config_namespace}/{config_name}' "
+            f"from workspace {workspace_namespace}/{workspace_name}"
+        )
+
+
+@mcp.tool()
+async def update_method_config(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    config_namespace: Annotated[str, "Method configuration namespace"],
+    config_name: Annotated[str, "Method configuration name"],
+    updates: Annotated[dict[str, Any], "Configuration updates to apply"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Update a method configuration in a Terra workspace.
+
+    This tool allows updating method configuration settings, including:
+    - Changing WDL version (methodRepoMethod.methodVersion)
+    - Modifying input/output mappings
+    - Changing root entity type
+
+    Common use case: Update WDL version to match development branch before testing.
+
+    Example updates dict to change WDL version:
+    {
+        "methodRepoMethod": {
+            "methodNamespace": "broad",
+            "methodName": "MyWorkflow",
+            "methodVersion": 6
+        }
+    }
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        config_namespace: The namespace of the method configuration
+        config_name: The name of the method configuration
+        updates: Dictionary with configuration fields to update
+
+    Returns:
+        Updated method configuration dictionary
+    """
+    try:
+        ctx.info(
+            f"Updating method configuration '{config_namespace}/{config_name}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.update_workspace_config(
+            workspace_namespace, workspace_name, config_namespace, config_name, updates
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Method configuration '{config_namespace}/{config_name}' not found in "
+                f"workspace '{workspace_namespace}/{workspace_name}'. "
+                "Please verify the configuration namespace and name are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to modify this configuration."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to update method configuration (HTTP {response.status_code}). "
+                "Please check the workspace, configuration names, and update body."
+            )
+
+        updated_config = response.json()
+        ctx.info(f"Successfully updated method configuration '{config_name}'")
+
+        return updated_config
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error updating method configuration: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to update method configuration '{config_namespace}/{config_name}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+
+@mcp.tool()
+async def copy_method_config(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    from_config_namespace: Annotated[str, "Source configuration namespace"],
+    from_config_name: Annotated[str, "Source configuration name"],
+    to_config_namespace: Annotated[str, "Destination configuration namespace"],
+    to_config_name: Annotated[str, "Destination configuration name"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Copy a method configuration within a Terra workspace.
+
+    Creates a copy of an existing method configuration with a new name. This is useful for:
+    - Creating development versions of production workflows
+    - Testing configuration changes without modifying the original
+    - Setting up parallel workflow variants
+
+    The copied configuration will have the same WDL version, input/output mappings,
+    and settings as the source configuration.
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        from_config_namespace: The namespace of the source configuration
+        from_config_name: The name of the source configuration
+        to_config_namespace: The namespace for the copied configuration
+        to_config_name: The name for the copied configuration
+
+    Returns:
+        The newly created method configuration dictionary
+    """
+    try:
+        ctx.info(
+            f"Copying method configuration '{from_config_namespace}/{from_config_name}' "
+            f"to '{to_config_namespace}/{to_config_name}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.copy_config_from_repo(
+            workspace_namespace,
+            workspace_name,
+            from_config_namespace,
+            from_config_name,
+            to_config_namespace,
+            to_config_name,
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Source method configuration '{from_config_namespace}/{from_config_name}' "
+                f"not found. Please verify the source configuration exists."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to copy configurations."
+            )
+        elif response.status_code == 409:
+            raise ToolError(
+                f"Destination configuration '{to_config_namespace}/{to_config_name}' "
+                "already exists. Please choose a different name."
+            )
+        elif response.status_code not in [200, 201]:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to copy method configuration (HTTP {response.status_code}). "
+                "Please check the configuration names and permissions."
+            )
+
+        new_config = response.json()
+        ctx.info(
+            f"Successfully copied method configuration to '{to_config_namespace}/{to_config_name}'"
+        )
+
+        return new_config
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error copying method configuration: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to copy method configuration from '{from_config_namespace}/{from_config_name}' "
+            f"to '{to_config_namespace}/{to_config_name}'"
+        )
+
+
+@mcp.tool()
+async def submit_workflow(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    config_namespace: Annotated[str, "Method configuration namespace"],
+    config_name: Annotated[str, "Method configuration name"],
+    entity_type: Annotated[str, "Entity type to run workflow on"],
+    entity_name: Annotated[str | None, "Entity name to run workflow on (or None if using expression)"],
+    ctx: Context,
+    expression: Annotated[
+        str | None,
+        "Optional entity expression for batch submission (e.g., 'this.samples')",
+    ] = None,
+    use_callcache: Annotated[bool, "Whether to use call caching (default: True)"] = True,
+) -> dict[str, Any]:
+    """Submit a workflow for execution in Terra.
+
+    Launches a WDL workflow using a method configuration. Can submit for a single entity
+    or use an entity expression for batch processing.
+
+    Before submission, verify:
+    1. Method configuration points to correct WDL version (use get_method_config)
+    2. Entity data is correct (use get_entities)
+    3. Input mappings are configured properly
+
+    Common patterns:
+    - Single entity: entity_name="sample_1", expression=None
+    - Batch processing: entity_name=None, expression="this.samples"
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        config_namespace: The namespace of the method configuration
+        config_name: The name of the method configuration
+        entity_type: The entity type (must match config's rootEntityType)
+        entity_name: The specific entity to run on (mutually exclusive with expression)
+        expression: Entity expression for batch submission (mutually exclusive with entity_name)
+        use_callcache: Whether to enable call caching for faster execution
+
+    Returns:
+        Dictionary containing submission details:
+        - submissionId: Unique identifier for this submission
+        - status: Initial submission status
+        - submissionDate: When the submission was created
+    """
+    try:
+        ctx.info(
+            f"Submitting workflow '{config_namespace}/{config_name}' "
+            f"for entity type '{entity_type}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.create_submission(
+            workspace_namespace,
+            workspace_name,
+            config_namespace,
+            config_name,
+            entity_type,
+            entity_name,
+            expression=expression,
+            use_callcache=use_callcache,
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Method configuration '{config_namespace}/{config_name}' or entity not found. "
+                "Please verify the configuration and entity exist."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to submit workflows."
+            )
+        elif response.status_code == 400:
+            ctx.error(f"Bad request: {response.text}")
+            raise ToolError(
+                f"Failed to submit workflow (HTTP 400). Common issues: "
+                "invalid entity type, missing inputs, or configuration errors. "
+                f"Details: {response.text}"
+            )
+        elif response.status_code not in [200, 201]:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to submit workflow (HTTP {response.status_code}). "
+                "Please check the configuration and entity."
+            )
+
+        submission = response.json()
+        ctx.info(
+            f"Successfully submitted workflow. Submission ID: {submission.get('submissionId')}"
+        )
+
+        return submission
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error submitting workflow: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to submit workflow '{config_namespace}/{config_name}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+
+@mcp.tool()
+async def abort_submission(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    submission_id: Annotated[str, "Submission identifier (UUID) to abort"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Abort a running workflow submission in Terra.
+
+    Cancels a workflow submission and all its running workflows. This is useful for:
+    - Stopping workflows with errors to save costs
+    - Canceling workflows launched with incorrect parameters
+    - Halting long-running jobs that are no longer needed
+
+    Note: Aborting is a request and may not be immediate. Workflows already in final
+    states (Succeeded, Failed) cannot be aborted.
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        submission_id: The unique identifier (UUID) of the submission to abort
+
+    Returns:
+        Dictionary containing:
+        - submission_id: The submission that was aborted
+        - status: Confirmation that abort was requested
+    """
+    try:
+        ctx.info(
+            f"Aborting submission '{submission_id}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+        response = fapi.abort_submission(workspace_namespace, workspace_name, submission_id)
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Submission '{submission_id}' not found in workspace "
+                f"'{workspace_namespace}/{workspace_name}'. "
+                "Please verify the submission ID is correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to abort submissions."
+            )
+        elif response.status_code == 400:
+            ctx.error(f"Bad request: {response.text}")
+            raise ToolError(
+                f"Failed to abort submission (HTTP 400). The submission may already be "
+                f"completed or in a state that cannot be aborted. Details: {response.text}"
+            )
+        elif response.status_code not in [200, 204]:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to abort submission (HTTP {response.status_code}). "
+                "Please check the submission ID and workspace."
+            )
+
+        ctx.info(f"Successfully requested abort for submission '{submission_id}'")
+
+        return {
+            "submission_id": submission_id,
+            "status": "abort_requested",
+            "message": "Abort request submitted. Workflows will be canceled shortly.",
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error aborting submission: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to abort submission '{submission_id}' "
+            f"in workspace {workspace_namespace}/{workspace_name}"
+        )
+
+
 # ===== Server Entry Point =====
 
 
