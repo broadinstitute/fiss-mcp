@@ -36,7 +36,8 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        pytest tests/ -v --cov=src/terra_mcp --cov-report=xml --cov-report=term
+        # Add src to PYTHONPATH so tests can import terra_mcp
+        PYTHONPATH=src pytest tests/ -v --cov=src/terra_mcp --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4

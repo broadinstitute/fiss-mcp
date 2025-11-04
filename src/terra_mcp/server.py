@@ -9,7 +9,6 @@ from typing import Annotated, Any
 from fastmcp import Context, FastMCP, ToolError
 from firecloud import api as fapi
 
-
 # Initialize MCP server
 mcp = FastMCP(
     "Terra.Bio MCP Server",
