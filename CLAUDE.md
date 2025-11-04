@@ -35,15 +35,19 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 
 ## Implementation Phases
 
-### Phase 1: Read-Only Tools (Priority)
-1. `list_workspaces` - List user's accessible Terra workspaces
-2. `get_workspace_data_tables` - List data tables in a workspace
-3. `get_submission_status` - Check workflow submission status by ID
-4. `get_job_metadata` - Get details about a specific job
-5. `get_submission_logs` - Fetch stderr/stdout from jobs
-   - Tail logs (last ~25K chars) by default for errors
-   - Offer option to fetch from beginning if needed
-   - Always show total log size and truncation applied
+### Phase 1: Read-Only Tools ✅ COMPLETED
+1. ✅ `list_workspaces` - List user's accessible Terra workspaces
+2. ✅ `get_workspace_data_tables` - List data tables in a workspace
+3. ✅ `get_submission_status` - Check workflow submission status by ID
+   - Supports `max_workflows` parameter (default: 10, use 0 for all)
+4. ✅ `get_job_metadata` - Get Cromwell metadata for specific workflows
+   - Supports `include_keys` and `exclude_keys` for filtering response
+5. ✅ `get_workflow_logs` - Fetch stderr/stdout from GCS
+   - Returns GCS URLs by default (fast)
+   - `fetch_content=True` to fetch actual log content from GCS
+   - Smart truncation (first 5K + last 20K chars) by default when fetching
+   - `truncate=False` for full logs when needed
+   - `max_chars` parameter to customize truncation limit
 
 ### Phase 2: Monitoring Tools
 6. `list_submissions` - List submissions with filtering by status/date
@@ -66,14 +70,37 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 
 ### Important FISS API Notes
 - API has rate limits - implement exponential backoff
-- Workflow logs are in Google Cloud Storage, accessed via signed URLs
+- Workflow logs are in Google Cloud Storage (GCS), accessed via gs:// URLs
+- Logs are duplicated in both GCS and GCP Batch Logs Explorer
 - Submission status values: "Submitted", "Running", "Succeeded", "Failed", "Aborted"
 - Job metadata includes Cromwell metadata with detailed execution info
+- `fapi.get_workflow_metadata()` supports `include_key` and `exclude_key` parameters for filtering
 
-## Development Notes
+## Development Notes & Learnings
+
+### Testing with FastMCP
+- FastMCP uses decorators that wrap functions in `FunctionTool` objects
+- Access underlying function via `.fn` attribute: `mcp._tool_manager._tools["tool_name"].fn`
+- Always import `ToolError` from `fastmcp.exceptions`, not `fastmcp` directly
 - Test FISS connectivity early: `from firecloud import api as fapi`
-- Use MCP evaluation harness for testing tools in isolation
+
+### FISS Installation Quirks
+- Firecloud requires `setuptools<80` due to deprecated `package_index` (see [fiss#192](https://github.com/broadinstitute/fiss/issues/192))
+- Must use `pip install --no-build-isolation` to use local setuptools
+- Document this in requirements.txt and installation instructions
+
+### GCS Log Fetching
+- Use `google-cloud-storage` library to fetch log content
+- Parse gs:// URLs: `gs://bucket/path/to/file` → bucket="bucket", blob="path/to/file"
+- Logs can be large (>1MB), always provide truncation options
+- Smart truncation preserves context (first 5K) and errors (last 20K)
+- Return both URLs and optional content for flexibility
+
+### MCP Server Design Patterns
 - Long-running workflows: Claude will need to poll status, MCP is stateless
+- Always provide sensible defaults but allow full data access when needed
+- Use `Annotated` type hints for parameter descriptions (visible to LLMs)
+- Two-tier error handling: `ToolError` for user-facing, masked exceptions for internal
 - Consider adding tool to parse/summarize Terra's call-caching information
 
 ## Future Enhancements (Post-MVP)

@@ -14,7 +14,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 - **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
 - **`get_submission_status`** - Get detailed status of workflow submissions (supports customizable workflow limits)
 - **`get_job_metadata`** - Get Cromwell metadata for specific workflows with optional filtering
-- **`get_workflow_logs`** - Get log file locations (GCS URLs) for workflow tasks
+- **`get_workflow_logs`** - Get workflow logs with optional GCS content fetching and smart truncation
 
 ## Use Cases
 
@@ -149,8 +149,20 @@ The workspace has 2 data tables:
 [Claude calls get_submission_status with submission_id="abc-123-def"]
 Submission abc-123-def is currently Running with 10 workflows:
 - Succeeded: 7 workflows
-- Running: 2 workflows  
+- Running: 2 workflows
 - Failed: 1 workflow
+```
+
+**Human**: Can you fetch the logs for the failed workflow and help me debug it?
+
+**Claude**: I'll fetch the stderr logs for the failed workflow.
+[Claude calls get_workflow_logs with workflow_id="wf-789", fetch_content=True]
+The task "AlignReads" failed with this error at the end of the log:
+```
+OutOfMemoryError: Java heap space
+  at htsjdk.samtools.BAMRecordCodec.decode()
+```
+This is a memory issue. The task needs more RAM allocated. You can increase the memory in your WDL using the runtime attribute: `memory: "32 GB"`
 ```
 
 ## Testing
@@ -174,8 +186,10 @@ The test suite includes:
 - Server initialization verification
 - Tool registration checks (all 5 Phase 1 tools)
 - Mocked FISS API responses
-- Error handling scenarios (404s, 403s, API failures)
-- Parameter validation (max_workflows, include_keys, etc.)
+- Mocked GCS log fetching and truncation
+- Error handling scenarios (404s, 403s, API failures, GCS errors)
+- Parameter validation (max_workflows, include_keys, fetch_content, truncate, etc.)
+- Helper function tests (truncation logic, GCS URL parsing)
 
 ## Development
 
@@ -239,12 +253,12 @@ async def my_new_tool(
 
 See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 
-### Phase 1: Read-Only Tools ✅
+### Phase 1: Read-Only Tools ✅ COMPLETED
 - [x] `list_workspaces`
 - [x] `get_workspace_data_tables`
 - [x] `get_submission_status` (with optional workflow limit)
 - [x] `get_job_metadata` (with optional metadata filtering)
-- [x] `get_workflow_logs` (returns GCS log URLs)
+- [x] `get_workflow_logs` (with optional GCS content fetching and smart truncation)
 
 ### Phase 2: Monitoring Tools
 - [ ] `list_submissions` (with cursor-based pagination)
@@ -269,6 +283,7 @@ See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 
 - **FastMCP**: Python framework for building MCP servers
 - **FISS (firecloud)**: Python client for Terra.Bio API
+- **google-cloud-storage**: For fetching workflow logs from GCS
 - **Pydantic**: Data validation and schema generation
 
 ## Troubleshooting
