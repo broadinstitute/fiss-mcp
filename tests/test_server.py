@@ -62,7 +62,7 @@ class TestListWorkspaces:
 
         with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"]._fn
+            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"].fn
 
             # Create mock context
             ctx = MagicMock()
@@ -87,7 +87,7 @@ class TestListWorkspaces:
 
         with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"]._fn
+            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"].fn
 
             ctx = MagicMock()
 
@@ -114,7 +114,7 @@ class TestGetWorkspaceDataTables:
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"]._fn
+            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"].fn
 
             ctx = MagicMock()
             result = await get_workspace_data_tables_fn(
@@ -140,7 +140,7 @@ class TestGetWorkspaceDataTables:
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"]._fn
+            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"].fn
 
             ctx = MagicMock()
 
@@ -165,7 +165,7 @@ class TestGetWorkspaceDataTables:
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"]._fn
+            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"].fn
 
             ctx = MagicMock()
 
@@ -200,7 +200,7 @@ class TestGetSubmissionStatus:
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"]._fn
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
 
             ctx = MagicMock()
             result = await get_submission_status_fn(
@@ -231,7 +231,7 @@ class TestGetSubmissionStatus:
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"]._fn
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
 
             ctx = MagicMock()
             result = await get_submission_status_fn(
@@ -257,7 +257,7 @@ class TestGetSubmissionStatus:
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"]._fn
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
 
             ctx = MagicMock()
 
