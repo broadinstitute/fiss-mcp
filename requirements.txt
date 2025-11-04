@@ -1,0 +1,14 @@
+# Terra.Bio MCP Server Dependencies
+
+# MCP Framework
+fastmcp>=0.2.0
+
+# Terra/FISS API Client
+firecloud>=0.16.0
+
+# Data validation (may be included in fastmcp)
+pydantic>=2.0.0
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
