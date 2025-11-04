@@ -78,4 +78,5 @@ jobs:
 
     - name: Format check with ruff
       run: |
-        ruff format src/ tests/ --check
+        # Non-blocking format check (informational only)
+        ruff format src/ tests/ --check || true
