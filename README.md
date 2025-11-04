@@ -272,10 +272,16 @@ See [CLAUDE.md](CLAUDE.md) for the complete implementation plan.
 - [x] `get_workflow_outputs`
 - [x] `get_workflow_cost`
 
-### Phase 3: Write Operations
-- [ ] `upload_data_to_table`
-- [ ] `submit_workflow`
-- [ ] `abort_submission`
+### Phase 3: Workflow Management Tools
+- [ ] `get_entities` - Read data from Terra tables
+- [ ] `get_method_config` - Get method configuration/WDL
+- [ ] `update_method_config` - Update method configuration
+- [ ] `copy_method_config` - Duplicate method configuration
+- [ ] `submit_workflow` - Launch workflows
+- [ ] `abort_submission` - Cancel running workflows
+
+### Phase 4: Data Management Tools
+- [ ] `upload_data_to_table` - Upload entity data
 
 ## Architecture
 

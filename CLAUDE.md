@@ -58,16 +58,37 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
    - Returns cost breakdown by compute, storage, network
    - Note: Cost data may be delayed (takes hours for GCP to process)
 
-### Phase 3: Write Operations (After read-only tools validated)
-9. `upload_data_to_table` - Add/update rows in Terra data tables
-10. `submit_workflow` - Launch a WDL workflow
-11. `abort_submission` - Cancel a running workflow
+### Phase 3: Workflow Management Tools
+9. `get_entities` - Read data from Terra data tables/entities
+   - Support filtering, pagination, and attribute selection
+   - Return entity metadata and attributes as structured data
+10. `get_method_config` - Get method configuration details
+   - Return WDL workflow definition and configuration
+   - Useful for verifying workflow versions match Git commits
+11. `update_method_config` - Update/modify method configuration
+   - Change workflow versions, inputs, outputs
+   - Essential for switching between Git branches during development
+12. `copy_method_config` - Duplicate method configuration to new name
+   - Copy workflow configurations within workspace
+   - Useful for creating test variants of workflows
+13. `submit_workflow` - Launch a WDL workflow
+   - Submit workflows with specified method configuration
+   - Support selecting different workflow versions
+14. `abort_submission` - Cancel a running workflow
+
+### Phase 4: Data Management Tools
+15. `upload_data_to_table` - Add/update rows in Terra data tables
+   - Upload entity data for workflow inputs
 
 ## FISS/Terra Context
 
 ### Key Terra Concepts
 - **Workspace**: Container for data, workflows, and analyses (identified by namespace + name)
 - **Data Tables**: Structured data (entities) used as workflow inputs
+- **Method Configuration**: Workflow configuration that links a WDL method to specific inputs/outputs
+  - Contains method snapshot ID (version), input/output mappings, and root entity type
+  - Identified by configuration namespace + configuration name
+  - Can be updated to point to different WDL versions (essential for development workflows)
 - **Submission**: A workflow run, can contain multiple workflows
 - **Workflow**: Individual WDL execution within a submission
 - **Job**: Individual task execution within a workflow
@@ -79,6 +100,24 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 - Submission status values: "Submitted", "Running", "Succeeded", "Failed", "Aborted"
 - Job metadata includes Cromwell metadata with detailed execution info
 - `fapi.get_workflow_metadata()` supports `include_key` and `exclude_key` parameters for filtering
+
+### Phase 3 API Functions
+**Entity/Table Data:**
+- `fapi.get_entities(namespace, workspace, etype)` - Get all entities of a type
+- `fapi.get_entities_tsv(namespace, workspace, etype, attrs=None)` - Get entities as TSV
+- `fapi.get_entity(namespace, workspace, etype, ename)` - Get single entity
+- `fapi.get_entities_query(...)` - Paginated query with filtering
+
+**Method Configurations:**
+- `fapi.get_workspace_config(namespace, workspace, cnamespace, config)` - Get method config details
+- `fapi.get_repository_method(namespace, method, snapshot_id)` - Get WDL from methods repo
+- `fapi.update_workspace_config(namespace, workspace, cnamespace, configname, body)` - Update method config
+- `fapi.copy_config_from_repo(...)` - Copy method config from repo to workspace
+- `fapi.validate_config(namespace, workspace, cnamespace, config)` - Validate method config
+
+**Workflow Submission:**
+- `fapi.create_submission(...)` - Submit workflow (already documented in Phase 1)
+- `fapi.abort_submission(namespace, workspace, submission_id)` - Cancel submission
 
 ## Development Notes & Learnings
 
