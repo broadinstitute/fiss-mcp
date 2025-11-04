@@ -471,7 +471,9 @@ class TestGetWorkflowLogs:
         mock_storage_client = Mock()
         mock_storage_client.bucket.return_value = mock_bucket
 
-        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response):
+        with patch(
+            "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response
+        ):
             with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
                 get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
 
@@ -526,7 +528,9 @@ class TestGetWorkflowLogs:
         mock_storage_client = Mock()
         mock_storage_client.bucket.return_value = mock_bucket
 
-        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response):
+        with patch(
+            "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response
+        ):
             with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
                 get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
 
