@@ -49,7 +49,9 @@ All planned tools have been successfully implemented following test-driven devel
 5. ✅ `get_submission_status` - Check workflow submission status by ID
    - Supports `max_workflows` parameter (default: 10, use 0 for all)
 6. ✅ `get_job_metadata` - Get Cromwell metadata for specific workflows
+   - By default excludes `commandLine` and `submittedFiles` to reduce response size
    - Supports `include_keys` and `exclude_keys` for filtering response
+   - Pass `exclude_keys=[]` to get full metadata including normally excluded fields
 7. ✅ `get_workflow_logs` - Fetch stderr/stdout from GCS
    - Returns GCS URLs by default (fast)
    - `fetch_content=True` to fetch actual log content from GCS
@@ -172,6 +174,9 @@ All planned tools have been successfully implemented following test-driven devel
 - Comprehensive error messages with actionable next steps
 - Validation before API calls to catch errors early
 - Consistent response formats across all tools
+- **Context size optimization**: Default to minimal responses to avoid exhausting LLM context
+  - `get_job_metadata` excludes verbose fields by default (`commandLine`, `submittedFiles`)
+  - Users can override with explicit parameters to get full data when needed
 
 ### Code Quality & CI/CD
 - Ruff for linting and formatting (enforced in CI)

@@ -328,11 +328,11 @@ async def get_job_metadata(
     ctx: Context,
     include_keys: Annotated[
         list[str] | None,
-        "Optional list of metadata keys to include (returns only these keys)",
+        "Optional list of metadata keys to include (returns only these keys, overrides exclude_keys)",
     ] = None,
     exclude_keys: Annotated[
         list[str] | None,
-        "Optional list of metadata keys to exclude (omits these keys)",
+        "Optional list of metadata keys to exclude (default excludes commandLine and submittedFiles to reduce size)",
     ] = None,
 ) -> dict[str, Any]:
     """Get detailed Cromwell metadata for a specific workflow/job.
@@ -340,23 +340,33 @@ async def get_job_metadata(
     Returns comprehensive execution metadata including task-level details, execution status,
     timing information, and references to log files. This is the Cromwell metadata JSON.
 
+    By default, excludes 'commandLine' and 'submittedFiles' to reduce response size.
+    To include everything, pass exclude_keys=[] explicitly.
+
     Use include_keys or exclude_keys to filter the response for specific information:
     - include_keys=['status', 'failures'] - Get only status and failure information
     - exclude_keys=['calls'] - Omit detailed call information to reduce response size
+    - exclude_keys=[] - Include all fields (including commandLine and submittedFiles)
 
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         submission_id: The submission UUID containing this workflow
         workflow_id: The workflow UUID to get metadata for
-        include_keys: Optional list of metadata keys to include
-        exclude_keys: Optional list of metadata keys to exclude
+        include_keys: Optional list of metadata keys to include (overrides default exclusions)
+        exclude_keys: Optional list of metadata keys to exclude (default: ['commandLine', 'submittedFiles'])
 
     Returns:
         Dictionary containing Cromwell workflow metadata (structure depends on filtering)
     """
     try:
         ctx.info(f"Fetching metadata for workflow {workflow_id} in submission {submission_id}")
+
+        # Apply default exclusions if no explicit filtering specified
+        # This reduces response size significantly by excluding verbose fields
+        if include_keys is None and exclude_keys is None:
+            exclude_keys = ["commandLine", "submittedFiles"]
+            ctx.info("Applying default exclusions: commandLine, submittedFiles")
 
         response = fapi.get_workflow_metadata(
             workspace_namespace,

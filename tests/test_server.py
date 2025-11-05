@@ -341,7 +341,7 @@ class TestGetJobMetadata:
 
     @pytest.mark.asyncio
     async def test_get_job_metadata_success(self):
-        """Test successful job metadata retrieval"""
+        """Test successful job metadata retrieval with default exclusions"""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -352,7 +352,9 @@ class TestGetJobMetadata:
             "calls": {},
         }
 
-        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
+        with patch(
+            "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response
+        ) as mock_call:
             get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
 
             ctx = MagicMock()
@@ -364,12 +366,16 @@ class TestGetJobMetadata:
                 ctx=ctx,
             )
 
+            # Verify the API was called with default exclusions
+            mock_call.assert_called_once()
+            assert mock_call.call_args[1]["exclude_key"] == ["commandLine", "submittedFiles"]
+
             assert result["workflowName"] == "test_workflow"
             assert result["status"] == "Succeeded"
 
     @pytest.mark.asyncio
     async def test_get_job_metadata_with_filtering(self):
-        """Test job metadata with include_keys filtering"""
+        """Test job metadata with include_keys filtering (overrides default exclusions)"""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -393,11 +399,56 @@ class TestGetJobMetadata:
             )
 
             # Verify the API was called with include_key parameter
+            # Default exclusions should NOT be applied when include_keys is specified
             mock_call.assert_called_once()
             assert mock_call.call_args[1]["include_key"] == ["status", "failures"]
+            assert mock_call.call_args[1]["exclude_key"] is None
 
             assert result["status"] == "Failed"
             assert "failures" in result
+
+    @pytest.mark.asyncio
+    async def test_get_job_metadata_with_empty_exclude_keys(self):
+        """Test job metadata with explicit empty exclude_keys to get full metadata"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "workflowName": "test_workflow",
+            "status": "Succeeded",
+            "calls": {
+                "task1": [
+                    {
+                        "commandLine": "echo 'hello'",
+                        "submittedFiles": {"workflow": "test.wdl"},
+                    }
+                ]
+            },
+        }
+
+        with patch(
+            "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response
+        ) as mock_call:
+            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+
+            ctx = MagicMock()
+            result = await get_job_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-456",
+                ctx=ctx,
+                exclude_keys=[],  # Explicitly request all fields
+            )
+
+            # Verify the API was called with empty exclude_key (overriding defaults)
+            mock_call.assert_called_once()
+            assert mock_call.call_args[1]["exclude_key"] == []
+            assert mock_call.call_args[1]["include_key"] is None
+
+            # Verify full metadata was returned (including normally excluded fields)
+            assert result["workflowName"] == "test_workflow"
+            assert result["status"] == "Succeeded"
+            assert "calls" in result
 
 
 class TestGetWorkflowLogs:
