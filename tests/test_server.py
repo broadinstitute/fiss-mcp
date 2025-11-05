@@ -368,7 +368,16 @@ class TestGetJobMetadata:
 
             # Verify the API was called with default exclusions
             mock_call.assert_called_once()
-            assert mock_call.call_args[1]["exclude_key"] == ["commandLine", "submittedFiles"]
+            expected_exclusions = [
+                "commandLine",
+                "submittedFiles",
+                "callCaching",
+                "executionEvents",
+                "workflowProcessingEvents",
+                "backendLabels",
+                "labels",
+            ]
+            assert mock_call.call_args[1]["exclude_key"] == expected_exclusions
 
             assert result["workflowName"] == "test_workflow"
             assert result["status"] == "Succeeded"

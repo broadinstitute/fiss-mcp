@@ -332,7 +332,7 @@ async def get_job_metadata(
     ] = None,
     exclude_keys: Annotated[
         list[str] | None,
-        "Optional list of metadata keys to exclude (default excludes commandLine and submittedFiles to reduce size)",
+        "Optional list of metadata keys to exclude (default excludes verbose fields to reduce size)",
     ] = None,
 ) -> dict[str, Any]:
     """Get detailed Cromwell metadata for a specific workflow/job.
@@ -340,7 +340,8 @@ async def get_job_metadata(
     Returns comprehensive execution metadata including task-level details, execution status,
     timing information, and references to log files. This is the Cromwell metadata JSON.
 
-    By default, excludes 'commandLine' and 'submittedFiles' to reduce response size.
+    By default, excludes verbose fields to reduce response size: 'commandLine', 'submittedFiles',
+    'callCaching', 'executionEvents', 'workflowProcessingEvents', 'backendLabels', 'labels'.
     To include everything, pass exclude_keys=[] explicitly.
 
     Use include_keys or exclude_keys to filter the response for specific information:
@@ -354,7 +355,7 @@ async def get_job_metadata(
         submission_id: The submission UUID containing this workflow
         workflow_id: The workflow UUID to get metadata for
         include_keys: Optional list of metadata keys to include (overrides default exclusions)
-        exclude_keys: Optional list of metadata keys to exclude (default: ['commandLine', 'submittedFiles'])
+        exclude_keys: Optional list of metadata keys to exclude (default: excludes 7 verbose fields)
 
     Returns:
         Dictionary containing Cromwell workflow metadata (structure depends on filtering)
@@ -365,8 +366,19 @@ async def get_job_metadata(
         # Apply default exclusions if no explicit filtering specified
         # This reduces response size significantly by excluding verbose fields
         if include_keys is None and exclude_keys is None:
-            exclude_keys = ["commandLine", "submittedFiles"]
-            ctx.info("Applying default exclusions: commandLine, submittedFiles")
+            exclude_keys = [
+                "commandLine",
+                "submittedFiles",
+                "callCaching",
+                "executionEvents",
+                "workflowProcessingEvents",
+                "backendLabels",
+                "labels",
+            ]
+            ctx.info(
+                "Applying default exclusions: commandLine, submittedFiles, callCaching, "
+                "executionEvents, workflowProcessingEvents, backendLabels, labels"
+            )
 
         response = fapi.get_workflow_metadata(
             workspace_namespace,
