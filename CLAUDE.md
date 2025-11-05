@@ -166,6 +166,27 @@ All planned tools have been successfully implemented following test-driven devel
 - Return both URLs and optional content for flexibility
 - Handle GCS fetch failures gracefully (return None, log error)
 
+### FISS API Quirks & Debugging
+- **Critical bug**: `include_key` parameter in `get_workflow_metadata` returns empty nested data
+  - Symptom: Using `include_key=["calls", "status"]` returns `calls: {}` (empty dict)
+  - Root cause: FISS API filters out nested data within included keys
+  - Solution: Use `exclude_key` instead to filter out unwanted fields
+  - Impact: Without this fix, `get_workflow_logs` returns 0 tasks with no log data
+- **Debugging strategy for empty data**:
+  1. Test the tool by calling the function directly (bypass MCP protocol)
+  2. Compare API response with/without filtering parameters
+  3. Check if the issue is with parameter filtering vs. actual missing data
+  4. Add regression tests to prevent the bug from returning
+- **Local testing workflow for MCP tools**:
+  ```python
+  # Import and call tool functions directly for fast debugging
+  from terra_mcp.server import mcp
+  tool_fn = mcp._tool_manager._tools["tool_name"].fn
+  result = await tool_fn(params..., ctx=MagicMock())
+  ```
+- **MCP server reconnection**: After fixing code, use `claude mcp reconnect <server-name>` to reload without restarting Claude Code
+- **Smart truncation effectiveness**: Real-world test showed 88% size reduction (208K→25K chars) while preserving error messages
+
 ### MCP Server Design Patterns
 - Long-running workflows: Claude will need to poll status, MCP is stateless
 - Always provide sensible defaults but allow full data access when needed
