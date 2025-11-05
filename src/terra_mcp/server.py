@@ -667,9 +667,7 @@ async def list_submissions(
 
         if workflow_name:
             filtered_submissions = [
-                s
-                for s in filtered_submissions
-                if s.get("methodConfigurationName") == workflow_name
+                s for s in filtered_submissions if s.get("methodConfigurationName") == workflow_name
             ]
             ctx.info(
                 f"Filtered to {len(filtered_submissions)} submissions "

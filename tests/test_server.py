@@ -750,14 +750,16 @@ class TestListSubmissions:
         # Create 25 mock submissions to test default pagination
         mock_submissions = []
         for i in range(25):
-            mock_submissions.append({
-                "submissionId": f"sub-{i:03d}",
-                "status": "Succeeded",
-                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
-                "submitter": "user@example.com",
-                "methodConfigurationName": "MyWorkflow",
-                "workflows": [{"workflowId": f"wf-{i}", "status": "Succeeded"}],
-            })
+            mock_submissions.append(
+                {
+                    "submissionId": f"sub-{i:03d}",
+                    "status": "Succeeded",
+                    "submissionDate": f"2024-01-{i + 1:02d}T10:00:00Z",
+                    "submitter": "user@example.com",
+                    "methodConfigurationName": "MyWorkflow",
+                    "workflows": [{"workflowId": f"wf-{i}", "status": "Succeeded"}],
+                }
+            )
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -786,14 +788,16 @@ class TestListSubmissions:
         # Create 15 mock submissions
         mock_submissions = []
         for i in range(15):
-            mock_submissions.append({
-                "submissionId": f"sub-{i:03d}",
-                "status": "Succeeded",
-                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
-                "submitter": "user@example.com",
-                "methodConfigurationName": "MyWorkflow",
-                "workflows": [],
-            })
+            mock_submissions.append(
+                {
+                    "submissionId": f"sub-{i:03d}",
+                    "status": "Succeeded",
+                    "submissionDate": f"2024-01-{i + 1:02d}T10:00:00Z",
+                    "submitter": "user@example.com",
+                    "methodConfigurationName": "MyWorkflow",
+                    "workflows": [],
+                }
+            )
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -985,14 +989,16 @@ class TestListSubmissions:
         """Test combining multiple filters"""
         mock_submissions = []
         for i in range(10):
-            mock_submissions.append({
-                "submissionId": f"sub-{i:03d}",
-                "status": "Failed" if i % 3 == 0 else "Succeeded",
-                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
-                "submitter": "alice@example.com" if i % 2 == 0 else "bob@example.com",
-                "methodConfigurationName": "WorkflowA" if i < 5 else "WorkflowB",
-                "workflows": [],
-            })
+            mock_submissions.append(
+                {
+                    "submissionId": f"sub-{i:03d}",
+                    "status": "Failed" if i % 3 == 0 else "Succeeded",
+                    "submissionDate": f"2024-01-{i + 1:02d}T10:00:00Z",
+                    "submitter": "alice@example.com" if i % 2 == 0 else "bob@example.com",
+                    "methodConfigurationName": "WorkflowA" if i < 5 else "WorkflowB",
+                    "workflows": [],
+                }
+            )
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1025,14 +1031,16 @@ class TestListSubmissions:
         """Test that limit=None returns all filtered submissions"""
         mock_submissions = []
         for i in range(25):
-            mock_submissions.append({
-                "submissionId": f"sub-{i:03d}",
-                "status": "Succeeded",
-                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
-                "submitter": "user@example.com",
-                "methodConfigurationName": "MyWorkflow",
-                "workflows": [],
-            })
+            mock_submissions.append(
+                {
+                    "submissionId": f"sub-{i:03d}",
+                    "status": "Succeeded",
+                    "submissionDate": f"2024-01-{i + 1:02d}T10:00:00Z",
+                    "submitter": "user@example.com",
+                    "methodConfigurationName": "MyWorkflow",
+                    "workflows": [],
+                }
+            )
 
         mock_response = MagicMock()
         mock_response.status_code = 200
