@@ -581,11 +581,23 @@ async def list_submissions(
     workspace_namespace: Annotated[str, "Terra workspace namespace"],
     workspace_name: Annotated[str, "Terra workspace name"],
     ctx: Context,
+    limit: Annotated[
+        int | None,
+        "Maximum number of submissions to return (default: 20, use None for all submissions)",
+    ] = 20,
+    status: Annotated[
+        str | None,
+        "Filter by submission status (e.g., 'Succeeded', 'Failed', 'Running', 'Submitted', 'Aborted')",
+    ] = None,
+    submitter: Annotated[str | None, "Filter by submitter email address"] = None,
+    workflow_name: Annotated[str | None, "Filter by workflow/method configuration name"] = None,
 ) -> list[dict[str, Any]]:
-    """List all workflow submissions in a Terra workspace.
+    """List workflow submissions in a Terra workspace with filtering and pagination.
 
-    Returns a list of all submissions in the workspace with their status and metadata.
-    Use this to find submission IDs for detailed analysis with get_submission_status.
+    Returns a list of submissions in the workspace with their status and metadata,
+    sorted by submission date (most recent first). By default, returns the most recent
+    20 submissions. Use filtering parameters to narrow results by status, submitter,
+    or workflow name.
 
     Each submission represents one or more workflow executions launched together.
     Common workflow to get submission details:
@@ -596,6 +608,10 @@ async def list_submissions(
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
+        limit: Maximum submissions to return (default: 20, use None for all)
+        status: Filter by submission status (Succeeded, Failed, Running, etc.)
+        submitter: Filter by submitter email address
+        workflow_name: Filter by method configuration name
 
     Returns:
         List of submission dictionaries containing:
@@ -629,12 +645,48 @@ async def list_submissions(
             )
 
         submissions = response.json()
-        ctx.info(
-            f"Successfully retrieved {len(submissions)} submissions from "
-            f"{workspace_namespace}/{workspace_name}"
-        )
+        ctx.info(f"Retrieved {len(submissions)} total submissions from API")
 
-        return submissions
+        # Sort submissions by date descending (most recent first)
+        submissions.sort(key=lambda s: s.get("submissionDate", ""), reverse=True)
+
+        # Apply filters
+        filtered_submissions = submissions
+
+        if status:
+            filtered_submissions = [s for s in filtered_submissions if s.get("status") == status]
+            ctx.info(f"Filtered to {len(filtered_submissions)} submissions with status={status}")
+
+        if submitter:
+            filtered_submissions = [
+                s for s in filtered_submissions if s.get("submitter") == submitter
+            ]
+            ctx.info(
+                f"Filtered to {len(filtered_submissions)} submissions from submitter={submitter}"
+            )
+
+        if workflow_name:
+            filtered_submissions = [
+                s
+                for s in filtered_submissions
+                if s.get("methodConfigurationName") == workflow_name
+            ]
+            ctx.info(
+                f"Filtered to {len(filtered_submissions)} submissions "
+                f"with workflow_name={workflow_name}"
+            )
+
+        # Apply pagination
+        if limit is not None and limit > 0:
+            paginated_submissions = filtered_submissions[:limit]
+            ctx.info(
+                f"Returning {len(paginated_submissions)} of {len(filtered_submissions)} "
+                f"submissions (limit={limit})"
+            )
+            return paginated_submissions
+        else:
+            ctx.info(f"Returning all {len(filtered_submissions)} filtered submissions")
+            return filtered_submissions
 
     except ToolError:
         raise

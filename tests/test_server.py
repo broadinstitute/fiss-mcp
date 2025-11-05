@@ -635,7 +635,7 @@ class TestListSubmissions:
 
     @pytest.mark.asyncio
     async def test_list_submissions_success(self):
-        """Test successful submission listing"""
+        """Test successful submission listing with sorting by date"""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = [
@@ -671,11 +671,12 @@ class TestListSubmissions:
             )
 
             assert len(result) == 2
-            assert result[0]["submissionId"] == "sub-123"
-            assert result[0]["status"] == "Succeeded"
-            assert result[1]["submissionId"] == "sub-456"
-            assert result[1]["status"] == "Running"
-            assert len(result[1]["workflows"]) == 2
+            # Should be sorted by date descending (most recent first)
+            assert result[0]["submissionId"] == "sub-456"  # 2024-01-02 (more recent)
+            assert result[0]["status"] == "Running"
+            assert result[1]["submissionId"] == "sub-123"  # 2024-01-01 (older)
+            assert result[1]["status"] == "Succeeded"
+            assert len(result[0]["workflows"]) == 2
 
     @pytest.mark.asyncio
     async def test_list_submissions_workspace_not_found(self):
@@ -742,6 +743,317 @@ class TestListSubmissions:
 
             assert result == []
             assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_pagination_default(self):
+        """Test pagination with default limit (20 submissions)"""
+        # Create 25 mock submissions to test default pagination
+        mock_submissions = []
+        for i in range(25):
+            mock_submissions.append({
+                "submissionId": f"sub-{i:03d}",
+                "status": "Succeeded",
+                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [{"workflowId": f"wf-{i}", "status": "Succeeded"}],
+            })
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+            )
+
+            # Should return only 20 submissions (default limit)
+            assert len(result) == 20
+            # Should be sorted by date descending (most recent first)
+            # Most recent is sub-024 (2024-01-25)
+            assert result[0]["submissionId"] == "sub-024"
+            assert result[19]["submissionId"] == "sub-005"
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_pagination_custom_limit(self):
+        """Test pagination with custom limit"""
+        # Create 15 mock submissions
+        mock_submissions = []
+        for i in range(15):
+            mock_submissions.append({
+                "submissionId": f"sub-{i:03d}",
+                "status": "Succeeded",
+                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            })
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+                limit=5,
+            )
+
+            # Should return only 5 submissions
+            assert len(result) == 5
+            # Should be most recent 5
+            assert result[0]["submissionId"] == "sub-014"
+            assert result[4]["submissionId"] == "sub-010"
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_filter_by_status(self):
+        """Test filtering by submission status"""
+        mock_submissions = [
+            {
+                "submissionId": "sub-001",
+                "status": "Succeeded",
+                "submissionDate": "2024-01-01T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-002",
+                "status": "Failed",
+                "submissionDate": "2024-01-02T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-003",
+                "status": "Running",
+                "submissionDate": "2024-01-03T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-004",
+                "status": "Failed",
+                "submissionDate": "2024-01-04T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+        ]
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+                status="Failed",
+            )
+
+            # Should return only Failed submissions
+            assert len(result) == 2
+            assert all(s["status"] == "Failed" for s in result)
+            # Should be sorted by date descending
+            assert result[0]["submissionId"] == "sub-004"
+            assert result[1]["submissionId"] == "sub-002"
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_filter_by_submitter(self):
+        """Test filtering by submitter email"""
+        mock_submissions = [
+            {
+                "submissionId": "sub-001",
+                "status": "Succeeded",
+                "submissionDate": "2024-01-01T10:00:00Z",
+                "submitter": "alice@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-002",
+                "status": "Succeeded",
+                "submissionDate": "2024-01-02T10:00:00Z",
+                "submitter": "bob@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-003",
+                "status": "Running",
+                "submissionDate": "2024-01-03T10:00:00Z",
+                "submitter": "alice@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            },
+        ]
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+                submitter="alice@example.com",
+            )
+
+            # Should return only alice's submissions
+            assert len(result) == 2
+            assert all(s["submitter"] == "alice@example.com" for s in result)
+            # Should be sorted by date descending
+            assert result[0]["submissionId"] == "sub-003"
+            assert result[1]["submissionId"] == "sub-001"
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_filter_by_workflow_name(self):
+        """Test filtering by workflow/method configuration name"""
+        mock_submissions = [
+            {
+                "submissionId": "sub-001",
+                "status": "Succeeded",
+                "submissionDate": "2024-01-01T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "AlignmentWorkflow",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-002",
+                "status": "Succeeded",
+                "submissionDate": "2024-01-02T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "VariantCalling",
+                "workflows": [],
+            },
+            {
+                "submissionId": "sub-003",
+                "status": "Running",
+                "submissionDate": "2024-01-03T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "AlignmentWorkflow",
+                "workflows": [],
+            },
+        ]
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+                workflow_name="AlignmentWorkflow",
+            )
+
+            # Should return only AlignmentWorkflow submissions
+            assert len(result) == 2
+            assert all(s["methodConfigurationName"] == "AlignmentWorkflow" for s in result)
+            # Should be sorted by date descending
+            assert result[0]["submissionId"] == "sub-003"
+            assert result[1]["submissionId"] == "sub-001"
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_combined_filters(self):
+        """Test combining multiple filters"""
+        mock_submissions = []
+        for i in range(10):
+            mock_submissions.append({
+                "submissionId": f"sub-{i:03d}",
+                "status": "Failed" if i % 3 == 0 else "Succeeded",
+                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
+                "submitter": "alice@example.com" if i % 2 == 0 else "bob@example.com",
+                "methodConfigurationName": "WorkflowA" if i < 5 else "WorkflowB",
+                "workflows": [],
+            })
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+                status="Failed",
+                submitter="alice@example.com",
+                limit=5,
+            )
+
+            # Should return Failed submissions from alice only
+            # Matching indices: 0 (Failed, alice), 6 (Failed, alice)
+            assert len(result) == 2
+            assert all(s["status"] == "Failed" for s in result)
+            assert all(s["submitter"] == "alice@example.com" for s in result)
+            # Should be sorted by date descending
+            assert result[0]["submissionId"] == "sub-006"
+            assert result[1]["submissionId"] == "sub-000"
+
+    @pytest.mark.asyncio
+    async def test_list_submissions_limit_none_returns_all(self):
+        """Test that limit=None returns all filtered submissions"""
+        mock_submissions = []
+        for i in range(25):
+            mock_submissions.append({
+                "submissionId": f"sub-{i:03d}",
+                "status": "Succeeded",
+                "submissionDate": f"2024-01-{i+1:02d}T10:00:00Z",
+                "submitter": "user@example.com",
+                "methodConfigurationName": "MyWorkflow",
+                "workflows": [],
+            })
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_submissions
+
+        with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
+            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+
+            ctx = MagicMock()
+            result = await list_submissions_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+                limit=None,
+            )
+
+            # Should return all 25 submissions
+            assert len(result) == 25
+            # Should still be sorted by date descending
+            assert result[0]["submissionId"] == "sub-024"
+            assert result[24]["submissionId"] == "sub-000"
 
 
 class TestGetWorkflowOutputs:
