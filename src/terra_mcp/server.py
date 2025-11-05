@@ -475,13 +475,22 @@ async def get_workflow_logs(
     try:
         ctx.info(f"Fetching log locations for workflow {workflow_id}")
 
-        # Get workflow metadata with only the keys we need for logs
+        # Get workflow metadata, excluding verbose fields we don't need for logs
+        # Note: include_key doesn't work as expected in FISS API (returns empty calls dict)
+        # so we use exclude_key instead
         response = fapi.get_workflow_metadata(
             workspace_namespace,
             workspace_name,
             submission_id,
             workflow_id,
-            include_key=["calls", "status", "workflowName"],
+            exclude_key=[
+                "commandLine",
+                "submittedFiles",
+                "callCaching",
+                "executionEvents",
+                "workflowProcessingEvents",
+                "backendLabels",
+            ],
         )
 
         if response.status_code == 404:

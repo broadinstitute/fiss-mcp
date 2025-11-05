@@ -629,6 +629,58 @@ class TestGetWorkflowLogs:
                 assert "Truncated" in stderr_content
                 assert "Total log size: 30,000" in stderr_content
 
+    @pytest.mark.asyncio
+    async def test_get_workflow_logs_uses_exclude_key_not_include_key(self):
+        """Test that get_workflow_logs uses exclude_key to avoid empty calls dict
+
+        Regression test for bug where using include_key returned empty calls dict.
+        FISS API's include_key parameter doesn't work as expected - it filters out
+        nested data within the included keys, so we use exclude_key instead.
+        """
+        mock_metadata_response = MagicMock()
+        mock_metadata_response.status_code = 200
+        mock_metadata_response.json.return_value = {
+            "workflowName": "test_workflow",
+            "status": "Failed",
+            "calls": {
+                "task1": [
+                    {
+                        "stderr": "gs://bucket/stderr.log",
+                        "stdout": "gs://bucket/stdout.log",
+                        "executionStatus": "Failed",
+                        "attempt": 1,
+                        "shardIndex": 0,
+                    }
+                ],
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata") as mock_get_metadata:
+            mock_get_metadata.return_value = mock_metadata_response
+
+            get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+
+            ctx = MagicMock()
+            result = await get_workflow_logs_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-456",
+                ctx=ctx,
+                fetch_content=False,
+            )
+
+            # Verify that exclude_key was used (not include_key)
+            mock_get_metadata.assert_called_once()
+            call_kwargs = mock_get_metadata.call_args[1]
+            assert "exclude_key" in call_kwargs
+            assert "include_key" not in call_kwargs
+
+            # Verify that logs were properly extracted (would be empty if include_key was used)
+            assert result["task_count"] == 1
+            assert "task1" in result["logs"]
+            assert result["logs"]["task1"]["stderr_url"] == "gs://bucket/stderr.log"
+
 
 class TestListSubmissions:
     """Test list_submissions tool"""
