@@ -48,6 +48,8 @@ All planned tools have been successfully implemented following test-driven devel
    - Returns full submission metadata including status, submitter, workflows
 5. ✅ `get_submission_status` - Check workflow submission status by ID
    - Supports `max_workflows` parameter (default: 10, use 0 for all)
+   - By default omits `inputResolutions` to reduce response size (94% smaller)
+   - Set `include_inputs=True` to see full workflow input values
 6. ✅ `get_job_metadata` - Get Cromwell metadata for specific workflows
    - By default excludes verbose fields to reduce response size: `commandLine`, `submittedFiles`, `callCaching`, `executionEvents`, `workflowProcessingEvents`, `backendLabels`, `labels`
    - Supports `include_keys` and `exclude_keys` for filtering response
@@ -197,7 +199,10 @@ All planned tools have been successfully implemented following test-driven devel
 - Consistent response formats across all tools
 - **Context size optimization**: Default to minimal responses to avoid exhausting LLM context
   - `get_job_metadata` excludes 7 verbose fields by default: `commandLine`, `submittedFiles`, `callCaching`, `executionEvents`, `workflowProcessingEvents`, `backendLabels`, `labels`
-  - Users can override with explicit parameters to get full data when needed (pass `exclude_keys=[]`)
+    - Users can override with explicit parameters to get full data when needed (pass `exclude_keys=[]`)
+  - `get_submission_status` omits `inputResolutions` by default (94% size reduction: 30K→1.7K tokens for 9 workflows)
+    - Set `include_inputs=True` to see full workflow input values when debugging
+    - Real-world impact: Critical for submissions with many workflows to avoid context exhaustion
 
 ### Code Quality & CI/CD
 - Ruff for linting and formatting (enforced in CI)

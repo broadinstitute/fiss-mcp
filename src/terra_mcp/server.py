@@ -220,6 +220,10 @@ async def get_submission_status(
         int | None,
         "Maximum number of workflows to return (default: 10, use 0 or None for all workflows)",
     ] = 10,
+    include_inputs: Annotated[
+        bool,
+        "Whether to include inputResolutions in workflow details (default: False to reduce response size)",
+    ] = False,
 ) -> dict[str, Any]:
     """Get the current status of a workflow submission.
 
@@ -230,11 +234,15 @@ async def get_submission_status(
     By default, returns the first 10 workflows for readability. Use max_workflows=0 or
     max_workflows=None to retrieve all workflows if needed for detailed analysis.
 
+    By default, omits inputResolutions from workflow details to reduce response size significantly
+    (typically 70-80% smaller). Set include_inputs=True to see full workflow input values.
+
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         submission_id: The unique identifier (UUID) of the submission
         max_workflows: Maximum workflows to return (default: 10, use 0/None for all)
+        include_inputs: Whether to include inputResolutions (default: False for smaller responses)
 
     Returns:
         Dictionary containing:
@@ -297,6 +305,19 @@ async def get_submission_status(
                 f"Showing first {max_workflows} of {len(workflows)} workflows"
                 if len(workflows) > max_workflows
                 else None
+            )
+
+        # Filter out inputResolutions if not requested to reduce response size
+        if not include_inputs:
+            filtered_workflows = []
+            for workflow in limited_workflows:
+                # Create a copy of the workflow dict without inputResolutions
+                filtered_workflow = {k: v for k, v in workflow.items() if k != "inputResolutions"}
+                filtered_workflows.append(filtered_workflow)
+            limited_workflows = filtered_workflows
+            ctx.info(
+                f"Filtered out inputResolutions from {len(limited_workflows)} workflows "
+                "to reduce response size"
             )
 
         return {

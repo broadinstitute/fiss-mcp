@@ -202,7 +202,7 @@ class TestGetSubmissionStatus:
 
     @pytest.mark.asyncio
     async def test_get_submission_status_success(self):
-        """Test successful submission status retrieval"""
+        """Test successful submission status retrieval with inputResolutions omitted by default"""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -210,9 +210,27 @@ class TestGetSubmissionStatus:
             "status": "Succeeded",
             "submissionDate": "2024-01-01T10:00:00Z",
             "workflows": [
-                {"workflowId": "wf-1", "status": "Succeeded"},
-                {"workflowId": "wf-2", "status": "Succeeded"},
-                {"workflowId": "wf-3", "status": "Failed"},
+                {
+                    "workflowId": "wf-1",
+                    "status": "Succeeded",
+                    "inputResolutions": [
+                        {"inputName": "test.input1", "value": "gs://bucket/file1.txt"}
+                    ],
+                },
+                {
+                    "workflowId": "wf-2",
+                    "status": "Succeeded",
+                    "inputResolutions": [
+                        {"inputName": "test.input2", "value": "gs://bucket/file2.txt"}
+                    ],
+                },
+                {
+                    "workflowId": "wf-3",
+                    "status": "Failed",
+                    "inputResolutions": [
+                        {"inputName": "test.input3", "value": "gs://bucket/file3.txt"}
+                    ],
+                },
             ],
         }
 
@@ -234,6 +252,12 @@ class TestGetSubmissionStatus:
             assert result["status_summary"]["Succeeded"] == 2
             assert result["status_summary"]["Failed"] == 1
             assert len(result["workflows"]) == 3
+
+            # Verify inputResolutions is omitted by default
+            for workflow in result["workflows"]:
+                assert "inputResolutions" not in workflow
+                assert "workflowId" in workflow  # Other fields still present
+                assert "status" in workflow
 
     @pytest.mark.asyncio
     async def test_get_submission_status_with_many_workflows(self):
@@ -334,6 +358,56 @@ class TestGetSubmissionStatus:
             assert result_all["workflow_count"] == 25
             assert len(result_all["workflows"]) == 25
             assert result_all["note"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_submission_status_with_inputs(self):
+        """Test that include_inputs=True preserves inputResolutions"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "submissionId": "abc-123",
+            "status": "Succeeded",
+            "submissionDate": "2024-01-01T10:00:00Z",
+            "workflows": [
+                {
+                    "workflowId": "wf-1",
+                    "status": "Succeeded",
+                    "inputResolutions": [
+                        {"inputName": "test.input1", "value": "gs://bucket/file1.txt"}
+                    ],
+                },
+                {
+                    "workflowId": "wf-2",
+                    "status": "Failed",
+                    "inputResolutions": [
+                        {"inputName": "test.input2", "value": "gs://bucket/file2.txt"}
+                    ],
+                },
+            ],
+        }
+
+        with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
+            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+
+            ctx = MagicMock()
+            result = await get_submission_status_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="abc-123",
+                ctx=ctx,
+                include_inputs=True,
+            )
+
+            assert result["submission_id"] == "abc-123"
+            assert result["workflow_count"] == 2
+            assert len(result["workflows"]) == 2
+
+            # Verify inputResolutions is INCLUDED when include_inputs=True
+            for workflow in result["workflows"]:
+                assert "inputResolutions" in workflow
+                assert len(workflow["inputResolutions"]) == 1
+                assert "inputName" in workflow["inputResolutions"][0]
+                assert "value" in workflow["inputResolutions"][0]
 
 
 class TestGetJobMetadata:
