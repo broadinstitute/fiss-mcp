@@ -160,9 +160,9 @@ After updating the configuration, restart Claude Desktop.
 To use this MCP server with Claude Code, run the following command from your terminal:
 
 ```bash
-claude mcp add terra --type stdio \
-  --command python3 \
-  --arg /absolute/path/to/fiss-mcp/src/terra_mcp/server.py
+claude mcp add terra --transport stdio \
+  -- python3 \
+  /absolute/path/to/fiss-mcp/src/terra_mcp/server.py
 ```
 
 Replace `/absolute/path/to/fiss-mcp` with the actual path to your cloned repository.
@@ -170,18 +170,18 @@ Replace `/absolute/path/to/fiss-mcp` with the actual path to your cloned reposit
 **Note**: If you installed dependencies in a Python virtual environment, use the absolute path to your venv's Python interpreter instead of `python3`:
 
 ```bash
-claude mcp add terra --type stdio \
-  --command /absolute/path/to/venv/bin/python3 \
-  --arg /absolute/path/to/fiss-mcp/src/terra_mcp/server.py
+claude mcp add terra --transport stdio \
+  -- /absolute/path/to/venv/bin/python3 \
+  /absolute/path/to/fiss-mcp/src/terra_mcp/server.py
 ```
 
 If you need to specify Google Cloud credentials:
 
 ```bash
-claude mcp add terra --type stdio \
-  --command python3 \
-  --arg /absolute/path/to/fiss-mcp/src/terra_mcp/server.py \
-  --env GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/credentials.json
+claude mcp add terra --transport stdio \
+  --env GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/credentials.json \
+  -- python3 \
+  /absolute/path/to/fiss-mcp/src/terra_mcp/server.py
 ```
 
 To verify the server is connected:
