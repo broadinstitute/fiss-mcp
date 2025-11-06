@@ -14,6 +14,27 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
 
 ## Key Design Decisions
 
+### Read-Only Safety Mode
+- **Default Behavior**: Server runs in read-only mode to prevent accidental modifications to Terra workspaces
+- **Protected Operations**: Write operations are disabled by default:
+  - `update_method_config` - Updating workflow configurations
+  - `copy_method_config` - Copying workflow configurations
+  - `submit_workflow` - Launching new workflows
+  - `abort_submission` - Canceling running workflows
+  - `upload_entities` - Uploading/updating entity data
+- **Enabling Writes**: Use `--allow-writes` command-line flag to enable write operations
+- **Error Messages**: Clear, actionable messages guide users to restart with `--allow-writes` if needed
+- **Testing**: Comprehensive test coverage with `enable_writes` pytest fixture for write tool tests
+
+**Usage Examples**:
+```bash
+# Default: Read-only mode (safe for exploration)
+python -m terra_mcp.server
+
+# Enable write operations (for active development)
+python -m terra_mcp.server --allow-writes
+```
+
 ### Workspace Identification
 - Always require explicit workspace namespace + name in tool calls
 - No implicit "current workspace" to avoid confusion
@@ -138,14 +159,18 @@ All planned tools have been successfully implemented following test-driven devel
 
 ### Test-Driven Development (TDD)
 - All tools were implemented following TDD principles: write tests first, then implement
-- 53 total tests with 75% code coverage
+- 70 total tests with comprehensive coverage
 - Comprehensive test coverage includes:
   - Success scenarios for all tools
   - Error handling (404, 403, 400, 409 responses)
   - Edge cases (empty data, invalid formats, truncation)
   - Helper function tests (GCS log fetching, truncation logic)
+  - Read-only mode safety feature (7 dedicated tests)
 - Tests use mocked FISS API responses for fast, deterministic execution
 - Mock GCS client for log fetching tests to avoid external dependencies
+- **`enable_writes` pytest fixture**: Temporarily enables write operations for testing write tools
+  - Ensures write tool tests pass while preserving read-only default behavior
+  - Automatically restores original state after each test
 
 ### Testing with FastMCP
 - FastMCP uses decorators that wrap functions in `FunctionTool` objects

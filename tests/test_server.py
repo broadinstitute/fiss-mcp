@@ -11,6 +11,17 @@ import pytest
 from terra_mcp.server import mcp
 
 
+@pytest.fixture
+def enable_writes():
+    """Pytest fixture to temporarily enable write operations for testing"""
+    import terra_mcp.server as server_module
+
+    original_allow_writes = server_module.ALLOW_WRITES
+    server_module.ALLOW_WRITES = True
+    yield
+    server_module.ALLOW_WRITES = original_allow_writes
+
+
 class TestServerInitialization:
     """Test basic server setup and configuration"""
 
@@ -1657,7 +1668,7 @@ class TestUpdateMethodConfig:
     """Test update_method_config tool"""
 
     @pytest.mark.asyncio
-    async def test_update_method_config_success(self):
+    async def test_update_method_config_success(self, enable_writes):
         """Test successful method config update"""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1691,7 +1702,7 @@ class TestUpdateMethodConfig:
             assert result["methodRepoMethod"]["methodVersion"] == 6
 
     @pytest.mark.asyncio
-    async def test_update_method_config_not_found(self):
+    async def test_update_method_config_not_found(self, enable_writes):
         """Test handling of non-existent method config"""
         from fastmcp.exceptions import ToolError
 
@@ -1721,7 +1732,7 @@ class TestCopyMethodConfig:
     """Test copy_method_config tool"""
 
     @pytest.mark.asyncio
-    async def test_copy_method_config_success(self):
+    async def test_copy_method_config_success(self, enable_writes):
         """Test successful method config copy"""
         mock_response = MagicMock()
         mock_response.status_code = 201
@@ -1748,7 +1759,7 @@ class TestCopyMethodConfig:
             assert result["name"] == "my_workflow_copy"
 
     @pytest.mark.asyncio
-    async def test_copy_method_config_source_not_found(self):
+    async def test_copy_method_config_source_not_found(self, enable_writes):
         """Test handling of non-existent source config"""
         from fastmcp.exceptions import ToolError
 
@@ -1779,7 +1790,7 @@ class TestSubmitWorkflow:
     """Test submit_workflow tool"""
 
     @pytest.mark.asyncio
-    async def test_submit_workflow_success(self):
+    async def test_submit_workflow_success(self, enable_writes):
         """Test successful workflow submission"""
         mock_response = MagicMock()
         mock_response.status_code = 201
@@ -1807,7 +1818,7 @@ class TestSubmitWorkflow:
             assert result["status"] == "Submitted"
 
     @pytest.mark.asyncio
-    async def test_submit_workflow_config_not_found(self):
+    async def test_submit_workflow_config_not_found(self, enable_writes):
         """Test handling of non-existent method config"""
         from fastmcp.exceptions import ToolError
 
@@ -1834,7 +1845,7 @@ class TestSubmitWorkflow:
             assert "not found" in error_msg or "Failed to submit" in error_msg
 
     @pytest.mark.asyncio
-    async def test_submit_workflow_with_expression(self):
+    async def test_submit_workflow_with_expression(self, enable_writes):
         """Test workflow submission with entity expression"""
         mock_response = MagicMock()
         mock_response.status_code = 201
@@ -1865,7 +1876,7 @@ class TestAbortSubmission:
     """Test abort_submission tool"""
 
     @pytest.mark.asyncio
-    async def test_abort_submission_success(self):
+    async def test_abort_submission_success(self, enable_writes):
         """Test successful submission abort"""
         mock_response = MagicMock()
         mock_response.status_code = 204  # No content - successful abort
@@ -1885,7 +1896,7 @@ class TestAbortSubmission:
             assert result["status"] == "abort_requested"
 
     @pytest.mark.asyncio
-    async def test_abort_submission_not_found(self):
+    async def test_abort_submission_not_found(self, enable_writes):
         """Test handling of non-existent submission"""
         from fastmcp.exceptions import ToolError
 
@@ -1909,7 +1920,7 @@ class TestAbortSubmission:
             assert "not found" in error_msg
 
     @pytest.mark.asyncio
-    async def test_abort_submission_already_completed(self):
+    async def test_abort_submission_already_completed(self, enable_writes):
         """Test aborting already completed submission"""
         from fastmcp.exceptions import ToolError
 
@@ -1941,7 +1952,7 @@ class TestUploadEntities:
     """Test upload_entities tool"""
 
     @pytest.mark.asyncio
-    async def test_upload_entities_success(self):
+    async def test_upload_entities_success(self, enable_writes):
         """Test successful entity upload"""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1983,7 +1994,7 @@ class TestUploadEntities:
             assert result["entity_type"] == "sample"
 
     @pytest.mark.asyncio
-    async def test_upload_entities_workspace_not_found(self):
+    async def test_upload_entities_workspace_not_found(self, enable_writes):
         """Test handling of non-existent workspace"""
         from fastmcp.exceptions import ToolError
 
@@ -2015,7 +2026,7 @@ class TestUploadEntities:
             assert "not found" in error_msg
 
     @pytest.mark.asyncio
-    async def test_upload_entities_access_denied(self):
+    async def test_upload_entities_access_denied(self, enable_writes):
         """Test handling of permission errors"""
         from fastmcp.exceptions import ToolError
 
@@ -2046,7 +2057,7 @@ class TestUploadEntities:
             assert "Access denied" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_upload_entities_empty_data(self):
+    async def test_upload_entities_empty_data(self, enable_writes):
         """Test handling of empty entity data"""
         from fastmcp.exceptions import ToolError
 
@@ -2066,7 +2077,7 @@ class TestUploadEntities:
         assert "cannot be empty" in error_msg
 
     @pytest.mark.asyncio
-    async def test_upload_entities_invalid_format(self):
+    async def test_upload_entities_invalid_format(self, enable_writes):
         """Test handling of invalid entity data format"""
         from fastmcp.exceptions import ToolError
 
@@ -2092,3 +2103,253 @@ class TestUploadEntities:
 
         error_msg = str(exc_info.value)
         assert "must have" in error_msg or "entityType" in error_msg
+
+
+class TestReadOnlyMode:
+    """Test read-only mode safety feature"""
+
+    @pytest.mark.asyncio
+    async def test_update_method_config_blocked_in_readonly_mode(self):
+        """Test that update_method_config is blocked in read-only mode"""
+        from fastmcp.exceptions import ToolError
+
+        import terra_mcp.server as server_module
+
+        # Save original value
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            # Set read-only mode
+            server_module.ALLOW_WRITES = False
+
+            update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await update_method_config_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    config_namespace="config-ns",
+                    config_name="config-name",
+                    updates={"methodRepoMethod": {"methodVersion": 5}},
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "read-only mode" in error_msg
+            assert "--allow-writes" in error_msg
+
+        finally:
+            # Restore original value
+            server_module.ALLOW_WRITES = original_allow_writes
+
+    @pytest.mark.asyncio
+    async def test_copy_method_config_blocked_in_readonly_mode(self):
+        """Test that copy_method_config is blocked in read-only mode"""
+        from fastmcp.exceptions import ToolError
+
+        import terra_mcp.server as server_module
+
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            server_module.ALLOW_WRITES = False
+
+            copy_method_config_fn = mcp._tool_manager._tools["copy_method_config"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await copy_method_config_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    from_config_namespace="config-ns",
+                    from_config_name="config-name",
+                    to_config_namespace="new-ns",
+                    to_config_name="new-name",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "read-only mode" in error_msg
+            assert "--allow-writes" in error_msg
+
+        finally:
+            server_module.ALLOW_WRITES = original_allow_writes
+
+    @pytest.mark.asyncio
+    async def test_submit_workflow_blocked_in_readonly_mode(self):
+        """Test that submit_workflow is blocked in read-only mode"""
+        from fastmcp.exceptions import ToolError
+
+        import terra_mcp.server as server_module
+
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            server_module.ALLOW_WRITES = False
+
+            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await submit_workflow_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    config_namespace="config-ns",
+                    config_name="config-name",
+                    entity_type="sample",
+                    entity_name="sample_1",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "read-only mode" in error_msg
+            assert "--allow-writes" in error_msg
+
+        finally:
+            server_module.ALLOW_WRITES = original_allow_writes
+
+    @pytest.mark.asyncio
+    async def test_abort_submission_blocked_in_readonly_mode(self):
+        """Test that abort_submission is blocked in read-only mode"""
+        from fastmcp.exceptions import ToolError
+
+        import terra_mcp.server as server_module
+
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            server_module.ALLOW_WRITES = False
+
+            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await abort_submission_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "read-only mode" in error_msg
+            assert "--allow-writes" in error_msg
+
+        finally:
+            server_module.ALLOW_WRITES = original_allow_writes
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_blocked_in_readonly_mode(self):
+        """Test that upload_entities is blocked in read-only mode"""
+        from fastmcp.exceptions import ToolError
+
+        import terra_mcp.server as server_module
+
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            server_module.ALLOW_WRITES = False
+
+            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+            ctx = MagicMock()
+
+            entity_data = [
+                {
+                    "name": "sample_1",
+                    "entityType": "sample",
+                    "attributes": {"sample_id": "S001"},
+                }
+            ]
+
+            with pytest.raises(ToolError) as exc_info:
+                await upload_entities_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=entity_data,
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "read-only mode" in error_msg
+            assert "--allow-writes" in error_msg
+
+        finally:
+            server_module.ALLOW_WRITES = original_allow_writes
+
+    @pytest.mark.asyncio
+    async def test_write_tools_allowed_when_writes_enabled(self):
+        """Test that write tools work when ALLOW_WRITES is True"""
+        import terra_mcp.server as server_module
+
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            # Enable writes
+            server_module.ALLOW_WRITES = True
+
+            # Test update_method_config passes the write check
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "namespace": "config-ns",
+                "name": "config-name",
+                "methodRepoMethod": {"methodVersion": 5},
+            }
+
+            with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
+                update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+                ctx = MagicMock()
+
+                result = await update_method_config_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    config_namespace="config-ns",
+                    config_name="config-name",
+                    updates={"methodRepoMethod": {"methodVersion": 5}},
+                    ctx=ctx,
+                )
+
+                # Should succeed without ToolError
+                assert result["namespace"] == "config-ns"
+                assert result["name"] == "config-name"
+
+        finally:
+            server_module.ALLOW_WRITES = original_allow_writes
+
+    @pytest.mark.asyncio
+    async def test_read_tools_always_work(self):
+        """Test that read-only tools work regardless of ALLOW_WRITES setting"""
+        import terra_mcp.server as server_module
+
+        original_allow_writes = server_module.ALLOW_WRITES
+
+        try:
+            # Test with writes disabled
+            server_module.ALLOW_WRITES = False
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = [
+                {
+                    "workspace": {
+                        "namespace": "test-ns",
+                        "name": "test-ws",
+                        "createdBy": "user@example.com",
+                        "createdDate": "2024-01-01T00:00:00Z",
+                    }
+                }
+            ]
+
+            with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
+                list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"].fn
+                ctx = MagicMock()
+
+                result = await list_workspaces_fn(ctx)
+
+                # Should succeed even with writes disabled
+                assert len(result) == 1
+                assert result[0]["namespace"] == "test-ns"
+
+        finally:
+            server_module.ALLOW_WRITES = original_allow_writes

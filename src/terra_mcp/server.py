@@ -4,12 +4,16 @@ MCP server for interacting with Terra.Bio workspaces via the FISS API.
 Provides tools for listing workspaces, querying data tables, and monitoring workflow submissions.
 """
 
+import argparse
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from firecloud import api as fapi
 from google.cloud import storage
+
+# Global flag to control write access (default: read-only mode)
+ALLOW_WRITES = False
 
 # Initialize MCP server
 mcp = FastMCP(
@@ -23,6 +27,26 @@ mcp = FastMCP(
 
 
 # ===== Helper Functions =====
+
+
+def _check_write_access(ctx: Context) -> None:
+    """Check if write operations are allowed.
+
+    Raises ToolError if the server is in read-only mode (ALLOW_WRITES=False).
+    This safety feature prevents accidental modifications to Terra workspaces.
+
+    Args:
+        ctx: FastMCP context for logging
+
+    Raises:
+        ToolError: If write operations are disabled
+    """
+    if not ALLOW_WRITES:
+        ctx.warning("Write operation blocked: server is in read-only mode")
+        raise ToolError(
+            "This server is running in read-only mode. Write operations are disabled for safety. "
+            "To enable write operations, restart the server with the --allow-writes flag."
+        )
 
 
 def _truncate_log_content(content: str, max_chars: int = 25000) -> tuple[str, bool]:
@@ -1069,6 +1093,9 @@ async def update_method_config(
     Returns:
         Updated method configuration dictionary
     """
+    # Check if write operations are allowed
+    _check_write_access(ctx)
+
     try:
         ctx.info(
             f"Updating method configuration '{config_namespace}/{config_name}' "
@@ -1143,6 +1170,9 @@ async def copy_method_config(
     Returns:
         The newly created method configuration dictionary
     """
+    # Check if write operations are allowed
+    _check_write_access(ctx)
+
     try:
         ctx.info(
             f"Copying method configuration '{from_config_namespace}/{from_config_name}' "
@@ -1245,6 +1275,9 @@ async def submit_workflow(
         - status: Initial submission status
         - submissionDate: When the submission was created
     """
+    # Check if write operations are allowed
+    _check_write_access(ctx)
+
     try:
         ctx.info(
             f"Submitting workflow '{config_namespace}/{config_name}' "
@@ -1331,6 +1364,9 @@ async def abort_submission(
         - submission_id: The submission that was aborted
         - status: Confirmation that abort was requested
     """
+    # Check if write operations are allowed
+    _check_write_access(ctx)
+
     try:
         ctx.info(
             f"Aborting submission '{submission_id}' "
@@ -1442,6 +1478,9 @@ async def upload_entities(
         - entity_count: Number of entities uploaded
         - entity_type: The entity type that was uploaded
     """
+    # Check if write operations are allowed
+    _check_write_access(ctx)
+
     try:
         # Validate entity_data
         if not entity_data:
@@ -1530,5 +1569,40 @@ async def upload_entities(
 
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Terra.Bio MCP Server - Interact with Terra workspaces via FISS API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Safety Features:
+  By default, the server runs in READ-ONLY mode to prevent accidental modifications
+  to your Terra workspaces. Use --allow-writes to enable write operations.
+
+Examples:
+  # Run in read-only mode (default)
+  python -m terra_mcp.server
+
+  # Enable write operations
+  python -m terra_mcp.server --allow-writes
+        """,
+    )
+    parser.add_argument(
+        "--allow-writes",
+        action="store_true",
+        help="Enable write operations (update configs, submit workflows, etc.). "
+        "Without this flag, the server runs in read-only mode for safety.",
+    )
+
+    args = parser.parse_args()
+
+    # Set write access flag based on command-line argument
+    ALLOW_WRITES = args.allow_writes
+
+    if ALLOW_WRITES:
+        print("⚠️  Write operations ENABLED - server can modify Terra workspaces", flush=True)
+    else:
+        print("✓ Read-only mode - write operations are disabled for safety", flush=True)
+        print("  Use --allow-writes flag to enable write operations", flush=True)
+
     # Run server with stdio transport (compatible with Claude Desktop)
     mcp.run()
