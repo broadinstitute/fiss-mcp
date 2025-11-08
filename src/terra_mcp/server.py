@@ -5,8 +5,10 @@ Provides tools for listing workspaces, querying data tables, and monitoring work
 """
 
 import argparse
-from typing import Annotated, Any
+import json
+from typing import Annotated, Any, Literal
 
+import jmespath
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from firecloud import api as fapi
@@ -116,6 +118,96 @@ def _fetch_gcs_log(gcs_url: str, ctx: Context) -> str | None:
     except Exception as e:
         ctx.error(f"Failed to fetch log from {gcs_url}: {type(e).__name__}: {e}")
         return None
+
+
+def _build_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Build a structured summary from Cromwell workflow metadata.
+
+    Extracts the most relevant information for LLM agents, including:
+    - Workflow status and timing
+    - Task execution counts by status
+    - Failed task details with errors and log URLs
+    - Execution summary
+
+    Args:
+        metadata: Raw Cromwell workflow metadata
+
+    Returns:
+        Structured summary dictionary optimized for LLM context efficiency
+    """
+    # Basic workflow info
+    workflow_id = metadata.get("id", "unknown")
+    workflow_name = metadata.get("workflowName", "unknown")
+    status = metadata.get("status", "Unknown")
+
+    # Timing information
+    start_time = metadata.get("start", "")
+    end_time = metadata.get("end", "")
+
+    # Analyze tasks/calls
+    calls = metadata.get("calls", {})
+    task_summary: dict[str, int] = {}
+    failed_tasks: list[dict[str, Any]] = []
+
+    for task_name, task_executions in calls.items():
+        for execution in task_executions:
+            exec_status = execution.get("executionStatus", "Unknown")
+            task_summary[exec_status] = task_summary.get(exec_status, 0) + 1
+
+            # Collect failed task details
+            if exec_status == "Failed":
+                # Extract error information
+                failures = execution.get("failures", [])
+                error_msg = ""
+                if failures:
+                    # Get first failure message
+                    error_msg = failures[0].get("message", "No error message available")
+
+                failed_task_info = {
+                    "name": task_name,
+                    "shard": execution.get("shardIndex", -1),
+                    "attempt": execution.get("attempt", 1),
+                    "error": error_msg,
+                    "stderr_url": execution.get("stderr", ""),
+                    "stdout_url": execution.get("stdout", ""),
+                }
+
+                # Add runtime info if available
+                if "start" in execution and "end" in execution:
+                    failed_task_info["runtime_info"] = {
+                        "start": execution["start"],
+                        "end": execution["end"],
+                    }
+
+                failed_tasks.append(failed_task_info)
+
+    # Build summary
+    summary = {
+        "workflow_id": workflow_id,
+        "workflow_name": workflow_name,
+        "status": status,
+        "tasks": {
+            "total": sum(task_summary.values()),
+            "by_status": task_summary,
+        },
+        "execution_summary": {
+            "start": start_time,
+            "end": end_time,
+        },
+    }
+
+    # Add failed tasks if any
+    if failed_tasks:
+        summary["failed_tasks"] = failed_tasks
+
+    # Add failures from top level if present
+    if "failures" in metadata and metadata["failures"]:
+        summary["workflow_failures"] = [
+            {"message": f.get("message", ""), "causedBy": f.get("causedBy", [])}
+            for f in metadata["failures"]
+        ]
+
+    return summary
 
 
 # ===== Phase 1: Read-Only Tools =====
@@ -371,67 +463,94 @@ async def get_job_metadata(
     submission_id: Annotated[str, "Submission identifier (UUID)"],
     workflow_id: Annotated[str, "Workflow identifier (UUID)"],
     ctx: Context,
-    include_keys: Annotated[
-        list[str] | None,
-        "Optional list of metadata keys to include (returns only these keys, overrides exclude_keys)",
+    mode: Annotated[
+        Literal["summary", "query", "full_download"],
+        'Mode: "summary" (default), "query" (JMESPath), or "full_download" (complete JSON)',
+    ] = "summary",
+    jmespath_query: Annotated[
+        str | None,
+        "JMESPath expression for query mode (e.g., 'status', 'calls | keys(@)', 'failures[*].message')",
     ] = None,
-    exclude_keys: Annotated[
-        list[str] | None,
-        "Optional list of metadata keys to exclude (default excludes verbose fields to reduce size)",
+    task_name: Annotated[
+        str | None,
+        "Optional: Filter to specific task name (works across all modes)",
     ] = None,
 ) -> dict[str, Any]:
-    """Get detailed Cromwell metadata for a specific workflow/job.
+    """Get workflow execution metadata from Cromwell.
 
-    Returns comprehensive execution metadata including task-level details, execution status,
-    timing information, and references to log files. This is the Cromwell metadata JSON.
+    **RECOMMENDED USAGE PATTERN FOR LLM AGENTS:**
 
-    By default, excludes verbose fields to reduce response size: 'commandLine', 'submittedFiles',
-    'callCaching', 'executionEvents', 'workflowProcessingEvents', 'backendLabels', 'labels'.
-    To include everything, pass exclude_keys=[] explicitly.
+    1. START HERE - summary mode (default):
+       Returns structured, context-efficient summary (~1-2K tokens vs 100K+)
+       - Workflow status, failed tasks with errors, timing
+       - Use this to understand workflow state and identify issues
 
-    Use include_keys or exclude_keys to filter the response for specific information:
-    - include_keys=['status', 'failures'] - Get only status and failure information
-    - exclude_keys=['calls'] - Omit detailed call information to reduce response size
-    - exclude_keys=[] - Include all fields (including commandLine and submittedFiles)
+    2. EXPLORE DETAILS - query mode (jmespath_query parameter):
+       Extract specific fields using JMESPath syntax
+       - Discover available fields: jmespath_query="keys(@)"
+       - List all tasks: jmespath_query="calls | keys(@)"
+       - Get specific data: jmespath_query="calls.AlignReads[0].stderr"
+       - All task statuses: jmespath_query="calls.*.executionStatus"
+       See https://jmespath.org/tutorial.html
+
+    3. LAST RESORT - full_download mode:
+       ⚠️  WARNING: Complete Cromwell JSON can be 100K-500K+ tokens
+
+       **CRITICAL: Do NOT read full metadata into your context!**
+
+       Recommended workflow:
+         1. Call get_job_metadata(..., mode="full_download")
+         2. Write response["metadata"] to /tmp/workflow_metadata.json
+         3. Explore with tools: jq '.calls | keys' /tmp/workflow_metadata.json
+         4. Read specific sections with Read tool (use offset/limit)
+
+       Only use if query mode cannot extract what you need.
 
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         submission_id: The submission UUID containing this workflow
         workflow_id: The workflow UUID to get metadata for
-        include_keys: Optional list of metadata keys to include (overrides default exclusions)
-        exclude_keys: Optional list of metadata keys to exclude (default: excludes 7 verbose fields)
+        mode: "summary" | "query" | "full_download" (default: "summary")
+        jmespath_query: JMESPath expression (required if mode="query")
+        task_name: Optional - filter to specific task name across all modes
 
     Returns:
-        Dictionary containing Cromwell workflow metadata (structure depends on filtering)
+        Dictionary with mode-specific structure:
+        - summary: Structured summary with workflow status, task counts, failures
+        - query: Result of JMESPath query execution
+        - full_download: Complete Cromwell metadata with size warning
     """
     try:
-        ctx.info(f"Fetching metadata for workflow {workflow_id} in submission {submission_id}")
-
-        # Apply default exclusions if no explicit filtering specified
-        # This reduces response size significantly by excluding verbose fields
-        if include_keys is None and exclude_keys is None:
-            exclude_keys = [
-                "commandLine",
-                "submittedFiles",
-                "callCaching",
-                "executionEvents",
-                "workflowProcessingEvents",
-                "backendLabels",
-                "labels",
-            ]
-            ctx.info(
-                "Applying default exclusions: commandLine, submittedFiles, callCaching, "
-                "executionEvents, workflowProcessingEvents, backendLabels, labels"
+        # Validate parameters
+        if mode == "query" and not jmespath_query:
+            raise ToolError(
+                'mode="query" requires jmespath_query parameter. '
+                "Example: jmespath_query='status' or jmespath_query='calls | keys(@)'"
             )
 
+        if jmespath_query and mode != "query":
+            ctx.warning(
+                f"jmespath_query provided but mode={mode}. "
+                'Did you mean to use mode="query"? Ignoring jmespath_query parameter.'
+            )
+
+        ctx.info(
+            f"Fetching metadata for workflow {workflow_id} in submission {submission_id} "
+            f"(mode={mode})"
+        )
+
+        # Fetch full metadata (we need it for all modes)
+        # Exclude very verbose fields that are rarely useful
         response = fapi.get_workflow_metadata(
             workspace_namespace,
             workspace_name,
             submission_id,
             workflow_id,
-            include_key=include_keys,
-            exclude_key=exclude_keys,
+            exclude_key=[
+                "submittedFiles",  # WDL source files, not needed for debugging
+                "workflowProcessingEvents",  # Internal Cromwell events
+            ],
         )
 
         if response.status_code == 404:
@@ -453,9 +572,76 @@ async def get_job_metadata(
             )
 
         metadata = response.json()
-        ctx.info(f"Successfully retrieved metadata for workflow {workflow_id}")
 
-        return metadata
+        # Apply task_name filter if specified
+        if task_name:
+            calls = metadata.get("calls", {})
+            if task_name in calls:
+                # Filter to just this task
+                metadata["calls"] = {task_name: calls[task_name]}
+                ctx.info(f"Filtered metadata to task '{task_name}'")
+            else:
+                ctx.warning(
+                    f"Task '{task_name}' not found in workflow. Available tasks: {list(calls.keys())}"
+                )
+                metadata["calls"] = {}
+
+        # Process based on mode
+        if mode == "summary":
+            ctx.info("Building structured summary from metadata")
+            summary = _build_metadata_summary(metadata)
+            ctx.info(
+                f"Built summary: {summary['tasks']['total']} tasks, status={summary['status']}"
+            )
+            return summary
+
+        elif mode == "query":
+            ctx.info(f"Executing JMESPath query: {jmespath_query}")
+            try:
+                result = jmespath.search(jmespath_query, metadata)
+                ctx.info(f"Query executed successfully, result type: {type(result).__name__}")
+                return {
+                    "mode": "query",
+                    "query": jmespath_query,
+                    "result": result,
+                }
+            except jmespath.exceptions.JMESPathError as e:
+                raise ToolError(
+                    f"Invalid JMESPath query: {e}. "
+                    "See https://jmespath.org/tutorial.html for syntax help."
+                )
+
+        elif mode == "full_download":
+            # Calculate size and provide warning
+            metadata_json = json.dumps(metadata)
+            size_chars = len(metadata_json)
+            size_tokens = size_chars // 4  # Rough estimate
+
+            ctx.warning(
+                f"Returning full metadata: {size_chars:,} characters (~{size_tokens:,} tokens)"
+            )
+
+            warning_msg = (
+                f"⚠️  Full metadata is {size_chars:,} characters (~{size_tokens:,} tokens). "
+                "Reading this into your context may exhaust your token budget! "
+                "\n\nRECOMMENDED: Write to /tmp/workflow_metadata.json and explore with jq/grep:\n"
+                "  1. Write('/tmp/workflow_metadata.json', response['metadata'])\n"
+                "  2. Bash('jq \".calls | keys\" /tmp/workflow_metadata.json')  # List tasks\n"
+                "  3. Bash('jq \".failures\" /tmp/workflow_metadata.json')  # See failures\n"
+                "  4. Read('/tmp/workflow_metadata.json', offset=X, limit=Y)  # View sections"
+            )
+
+            return {
+                "mode": "full_download",
+                "size_warning": warning_msg,
+                "size_chars": size_chars,
+                "estimated_tokens": size_tokens,
+                "metadata": metadata,
+            }
+
+        else:
+            # Should never reach here due to Literal type, but just in case
+            raise ToolError(f"Invalid mode: {mode}. Must be 'summary', 'query', or 'full_download'")
 
     except ToolError:
         raise

@@ -71,10 +71,18 @@ All planned tools have been successfully implemented following test-driven devel
    - Supports `max_workflows` parameter (default: 10, use 0 for all)
    - By default omits `inputResolutions` to reduce response size (94% smaller)
    - Set `include_inputs=True` to see full workflow input values
-6. ✅ `get_job_metadata` - Get Cromwell metadata for specific workflows
-   - By default excludes verbose fields to reduce response size: `commandLine`, `submittedFiles`, `callCaching`, `executionEvents`, `workflowProcessingEvents`, `backendLabels`, `labels`
-   - Supports `include_keys` and `exclude_keys` for filtering response
-   - Pass `exclude_keys=[]` to get full metadata including normally excluded fields
+6. ✅ `get_job_metadata` - Get Cromwell metadata with progressive disclosure modes
+   - **Summary mode (default)**: Returns structured summary (~1-2K tokens vs 100K+)
+     - Workflow status, task counts by status, failed task details with errors
+     - Optimized for LLM context efficiency
+   - **Query mode (JMESPath)**: Extract specific fields using JMESPath syntax
+     - Discover keys: `jmespath_query="keys(@)"` or `jmespath_query="calls | keys(@)"`
+     - Extract specific data: `jmespath_query="failures[*].message"`
+     - See https://jmespath.org for syntax reference
+   - **Full download mode**: Complete Cromwell JSON with size warnings
+     - Includes guidance to write to temp file and explore with jq/grep
+     - Prevents context exhaustion by encouraging file-based exploration
+   - **Task name filtering**: Optional `task_name` parameter works across all modes
 7. ✅ `get_workflow_logs` - Fetch stderr/stdout from GCS
    - Returns GCS URLs by default (fast)
    - `fetch_content=True` to fetch actual log content from GCS
@@ -159,7 +167,7 @@ All planned tools have been successfully implemented following test-driven devel
 
 ### Test-Driven Development (TDD)
 - All tools were implemented following TDD principles: write tests first, then implement
-- 70 total tests with comprehensive coverage
+- 75 total tests with comprehensive coverage
 - Comprehensive test coverage includes:
   - Success scenarios for all tools
   - Error handling (404, 403, 400, 409 responses)
@@ -193,6 +201,33 @@ All planned tools have been successfully implemented following test-driven devel
 - Return both URLs and optional content for flexibility
 - Handle GCS fetch failures gracefully (return None, log error)
 
+### Progressive Disclosure Pattern for get_job_metadata
+- **Design goal**: Prevent LLM context exhaustion while allowing full data access when needed
+- **Three-mode approach optimized for LLM agents**:
+  1. **Summary mode (default)**: Structured, semantic summary (~1-2K tokens)
+     - Workflow status, task counts, failed task details with errors
+     - Helper function `_build_metadata_summary()` extracts actionable information
+     - Perfect for initial debugging and understanding workflow state
+  2. **Query mode (JMESPath)**: Targeted field extraction
+     - Uses `jmespath` library (pure Python, safe, no code execution)
+     - Enables discovery: `keys(@)` shows available fields, `calls | keys(@)` lists tasks
+     - Extract specific data without loading full JSON into context
+     - Clear error messages for invalid queries with link to jmespath.org
+  3. **Full download mode**: Complete metadata with strong guidance
+     - Returns full Cromwell JSON with size warnings (chars and estimated tokens)
+     - **Critical safety feature**: Response includes explicit instructions to write to temp file
+     - Recommends jq/grep workflow: write to `/tmp/workflow_metadata.json`, then explore
+     - Prevents agents from naively reading 100K+ token responses into context
+- **Security considerations**:
+  - JMESPath is safe (no code execution, unlike full jq with shell access)
+  - Potential DOS from complex queries, but acceptable for authenticated MCP server use
+  - No injection vulnerabilities - JMESPath is a query language, not executable code
+- **Discoverability for LLM agents**:
+  - Mode parameter uses `Literal` type hints - visible in tool schema
+  - Rich docstring with clear usage patterns and examples
+  - Default mode (summary) is safest and most useful
+  - Warning messages guide agents away from dangerous patterns
+
 ### FISS API Quirks & Debugging
 - **Critical bug**: `include_key` parameter in `get_workflow_metadata` returns empty nested data
   - Symptom: Using `include_key=["calls", "status"]` returns `calls: {}` (empty dict)
@@ -223,8 +258,10 @@ All planned tools have been successfully implemented following test-driven devel
 - Validation before API calls to catch errors early
 - Consistent response formats across all tools
 - **Context size optimization**: Default to minimal responses to avoid exhausting LLM context
-  - `get_job_metadata` excludes 7 verbose fields by default: `commandLine`, `submittedFiles`, `callCaching`, `executionEvents`, `workflowProcessingEvents`, `backendLabels`, `labels`
-    - Users can override with explicit parameters to get full data when needed (pass `exclude_keys=[]`)
+  - `get_job_metadata` uses progressive disclosure with three modes:
+    - **Summary mode (default)**: Structured summary optimized for LLMs (~1-2K tokens vs 100K+)
+    - **Query mode**: JMESPath queries to extract specific fields without loading full metadata
+    - **Full download mode**: Complete JSON with warnings and guidance to write to temp file
   - `get_submission_status` omits `inputResolutions` by default (94% size reduction: 30K→1.7K tokens for 9 workflows)
     - Set `include_inputs=True` to see full workflow input values when debugging
     - Real-world impact: Critical for submissions with many workflows to avoid context exhaustion
