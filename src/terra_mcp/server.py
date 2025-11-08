@@ -8,7 +8,6 @@ import argparse
 import json
 from typing import Annotated, Any, Literal
 
-import jmespath
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from firecloud import api as fapi
@@ -208,6 +207,126 @@ def _build_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
         ]
 
     return summary
+
+
+def _extract_field_by_path(data: Any, path: str, ctx: Context) -> Any:
+    """Extract data from nested dict/list using dot-path notation.
+
+    Supports:
+    - Dot notation: "calls.taskName.outputs"
+    - Array indexing: "calls.taskName[0].outputs"
+    - Wildcards: "calls.*.runtimeAttributes" (returns dict mapping task names to values)
+
+    Args:
+        data: The data structure to extract from
+        path: Dot-separated path (e.g., "calls.task1.outputs.file")
+        ctx: FastMCP context for logging
+
+    Returns:
+        Extracted value(s)
+
+    Raises:
+        ToolError: If path is invalid or data not found
+    """
+    if not path:
+        return data
+
+    parts = []
+    current = ""
+    i = 0
+    while i < len(path):
+        char = path[i]
+        if char == ".":
+            if current:
+                parts.append(current)
+                current = ""
+        elif char == "[":
+            if current:
+                parts.append(current)
+                current = ""
+            # Find matching ]
+            j = path.find("]", i)
+            if j == -1:
+                raise ToolError(f"Invalid path: unmatched '[' at position {i}")
+            index_str = path[i + 1 : j]
+            parts.append(f"[{index_str}]")
+            i = j
+        else:
+            current += char
+        i += 1
+
+    if current:
+        parts.append(current)
+
+    result = data
+    path_so_far = []
+
+    for part in parts:
+        path_so_far.append(part)
+
+        # Handle array indexing
+        if part.startswith("[") and part.endswith("]"):
+            index_str = part[1:-1]
+            try:
+                index = int(index_str)
+            except ValueError:
+                raise ToolError(f"Invalid array index: {index_str} in path {'.'.join(path_so_far)}")
+
+            if not isinstance(result, list):
+                raise ToolError(
+                    f"Cannot index non-list at path {'.'.join(path_so_far[:-1])}. "
+                    f"Got {type(result).__name__}"
+                )
+
+            try:
+                result = result[index]
+            except IndexError:
+                raise ToolError(
+                    f"Index {index} out of range at path {'.'.join(path_so_far)}. "
+                    f"List has {len(result)} elements"
+                )
+
+        # Handle wildcard
+        elif part == "*":
+            if not isinstance(result, dict):
+                raise ToolError(
+                    f"Cannot use wildcard on non-dict at path {'.'.join(path_so_far[:-1])}. "
+                    f"Got {type(result).__name__}"
+                )
+
+            # Apply remaining path to each value
+            remaining_path = ".".join(parts[parts.index(part) + 1 :]) if parts.index(part) < len(parts) - 1 else ""
+
+            wildcard_results = {}
+            for key, value in result.items():
+                if remaining_path:
+                    try:
+                        wildcard_results[key] = _extract_field_by_path(value, remaining_path, ctx)
+                    except ToolError:
+                        # Skip items that don't match remaining path
+                        pass
+                else:
+                    wildcard_results[key] = value
+
+            return wildcard_results
+
+        # Handle regular key
+        else:
+            if isinstance(result, dict):
+                if part not in result:
+                    available_keys = list(result.keys())[:10]  # Show first 10 keys
+                    raise ToolError(
+                        f"Key '{part}' not found at path {'.'.join(path_so_far)}. "
+                        f"Available keys: {available_keys}{'...' if len(result) > 10 else ''}"
+                    )
+                result = result[part]
+            else:
+                raise ToolError(
+                    f"Cannot access key '{part}' on non-dict at path {'.'.join(path_so_far[:-1])}. "
+                    f"Got {type(result).__name__}"
+                )
+
+    return result
 
 
 # ===== Phase 1: Read-Only Tools =====
@@ -464,16 +583,24 @@ async def get_job_metadata(
     workflow_id: Annotated[str, "Workflow identifier (UUID)"],
     ctx: Context,
     mode: Annotated[
-        Literal["summary", "query", "full_download"],
-        'Mode: "summary" (default), "query" (JMESPath), or "full_download" (complete JSON)',
+        Literal["summary", "extract", "full_download"],
+        'Mode: "summary" (default), "extract" (specific fields), or "full_download" (complete JSON)',
     ] = "summary",
-    jmespath_query: Annotated[
-        str | None,
-        "JMESPath expression for query mode (e.g., 'status', 'calls | keys(@)', 'failures[*].message')",
-    ] = None,
     task_name: Annotated[
         str | None,
-        "Optional: Filter to specific task name (works across all modes)",
+        "Filter to specific task name (e.g., 'illumina_demux')",
+    ] = None,
+    shard_index: Annotated[
+        int | None,
+        "Filter to specific shard/scatter index (use with task_name)",
+    ] = None,
+    output_name: Annotated[
+        str | None,
+        "Extract specific output variable (e.g., 'commonBarcodes'). Use with task_name.",
+    ] = None,
+    field_path: Annotated[
+        str | None,
+        "Extract field using dot-path notation (e.g., 'calls.*.runtimeAttributes' or 'calls.task1[0].outputs.file')",
     ] = None,
 ) -> dict[str, Any]:
     """Get workflow execution metadata from Cromwell.
@@ -485,13 +612,20 @@ async def get_job_metadata(
        - Workflow status, failed tasks with errors, timing
        - Use this to understand workflow state and identify issues
 
-    2. EXPLORE DETAILS - query mode (jmespath_query parameter):
-       Extract specific fields using JMESPath syntax
-       - Discover available fields: jmespath_query="keys(@)"
-       - List all tasks: jmespath_query="calls | keys(@)"
-       - Get specific data: jmespath_query="calls.AlignReads[0].stderr"
-       - All task statuses: jmespath_query="calls.*.executionStatus"
-       See https://jmespath.org/tutorial.html
+    2. EXTRACT SPECIFIC DATA - extract mode with semantic parameters:
+       Get exactly what you need without loading full metadata into context
+
+       Examples:
+       - Get specific output: task_name="illumina_demux", output_name="commonBarcodes"
+       - Get shard output: task_name="task1", shard_index=5, output_name="result"
+       - Get all runtimes: field_path="calls.*.runtimeAttributes"
+       - Get all costs: field_path="calls.*.runtimeAttributes.preemptible"
+       - Get task outputs: field_path="calls.taskName[0].outputs"
+
+       Dot-path syntax:
+       - Use dots for nesting: "calls.task1.outputs"
+       - Use [N] for array indexing: "calls.task1[0].outputs"
+       - Use * for wildcards: "calls.*.executionStatus"
 
     3. LAST RESORT - full_download mode:
        ⚠️  WARNING: Complete Cromwell JSON can be 100K-500K+ tokens
@@ -501,39 +635,42 @@ async def get_job_metadata(
        Recommended workflow:
          1. Call get_job_metadata(..., mode="full_download")
          2. Write response["metadata"] to /tmp/workflow_metadata.json
-         3. Explore with tools: jq '.calls | keys' /tmp/workflow_metadata.json
-         4. Read specific sections with Read tool (use offset/limit)
+         3. Explore with tools: jq, grep, or Read with offset/limit
 
-       Only use if query mode cannot extract what you need.
+       Only use if extract mode cannot get what you need.
 
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         submission_id: The submission UUID containing this workflow
         workflow_id: The workflow UUID to get metadata for
-        mode: "summary" | "query" | "full_download" (default: "summary")
-        jmespath_query: JMESPath expression (required if mode="query")
-        task_name: Optional - filter to specific task name across all modes
+        mode: "summary" | "extract" | "full_download" (default: "summary")
+        task_name: Filter to specific task (required for output_name)
+        shard_index: Specific scatter shard (optional, use with task_name)
+        output_name: Specific output variable name (requires task_name)
+        field_path: Dot-path for flexible extraction (e.g., "calls.*.runtimeAttributes")
 
     Returns:
         Dictionary with mode-specific structure:
         - summary: Structured summary with workflow status, task counts, failures
-        - query: Result of JMESPath query execution
+        - extract: Extracted data with size info
         - full_download: Complete Cromwell metadata with size warning
     """
     try:
         # Validate parameters
-        if mode == "query" and not jmespath_query:
-            raise ToolError(
-                'mode="query" requires jmespath_query parameter. '
-                "Example: jmespath_query='status' or jmespath_query='calls | keys(@)'"
-            )
-
-        if jmespath_query and mode != "query":
-            ctx.warning(
-                f"jmespath_query provided but mode={mode}. "
-                'Did you mean to use mode="query"? Ignoring jmespath_query parameter.'
-            )
+        if mode == "extract":
+            if output_name and not task_name:
+                raise ToolError(
+                    "output_name requires task_name. "
+                    "Example: task_name='illumina_demux', output_name='commonBarcodes'"
+                )
+            if shard_index is not None and not task_name:
+                raise ToolError("shard_index requires task_name")
+            if not output_name and not field_path:
+                raise ToolError(
+                    'mode="extract" requires either output_name (with task_name) or field_path. '
+                    'Examples: output_name="file" or field_path="calls.*.runtimeAttributes"'
+                )
 
         ctx.info(
             f"Fetching metadata for workflow {workflow_id} in submission {submission_id} "
@@ -573,19 +710,6 @@ async def get_job_metadata(
 
         metadata = response.json()
 
-        # Apply task_name filter if specified
-        if task_name:
-            calls = metadata.get("calls", {})
-            if task_name in calls:
-                # Filter to just this task
-                metadata["calls"] = {task_name: calls[task_name]}
-                ctx.info(f"Filtered metadata to task '{task_name}'")
-            else:
-                ctx.warning(
-                    f"Task '{task_name}' not found in workflow. Available tasks: {list(calls.keys())}"
-                )
-                metadata["calls"] = {}
-
         # Process based on mode
         if mode == "summary":
             ctx.info("Building structured summary from metadata")
@@ -595,21 +719,74 @@ async def get_job_metadata(
             )
             return summary
 
-        elif mode == "query":
-            ctx.info(f"Executing JMESPath query: {jmespath_query}")
-            try:
-                result = jmespath.search(jmespath_query, metadata)
-                ctx.info(f"Query executed successfully, result type: {type(result).__name__}")
-                return {
-                    "mode": "query",
-                    "query": jmespath_query,
-                    "result": result,
-                }
-            except jmespath.exceptions.JMESPathError as e:
-                raise ToolError(
-                    f"Invalid JMESPath query: {e}. "
-                    "See https://jmespath.org/tutorial.html for syntax help."
-                )
+        elif mode == "extract":
+            # Build extraction path from semantic parameters
+            if output_name:
+                # Semantic extraction: task_name + optional shard_index + output_name
+                calls = metadata.get("calls", {})
+                if task_name not in calls:
+                    available_tasks = list(calls.keys())
+                    raise ToolError(
+                        f"Task '{task_name}' not found. Available tasks: {available_tasks}"
+                    )
+
+                task_executions = calls[task_name]
+
+                # Select shard
+                if shard_index is not None:
+                    matching_exec = None
+                    for execution in task_executions:
+                        if execution.get("shardIndex", -1) == shard_index:
+                            matching_exec = execution
+                            break
+                    if not matching_exec:
+                        shard_indices = [e.get("shardIndex", -1) for e in task_executions]
+                        raise ToolError(
+                            f"Shard {shard_index} not found for task '{task_name}'. "
+                            f"Available shards: {shard_indices}"
+                        )
+                    execution = matching_exec
+                else:
+                    # Use first execution (most common case)
+                    if len(task_executions) > 1:
+                        ctx.warning(
+                            f"Task '{task_name}' has {len(task_executions)} executions. "
+                            "Using first one. Specify shard_index to select a specific one."
+                        )
+                    execution = task_executions[0]
+
+                # Extract output
+                outputs = execution.get("outputs", {})
+                if output_name not in outputs:
+                    available_outputs = list(outputs.keys())
+                    raise ToolError(
+                        f"Output '{output_name}' not found for task '{task_name}'. "
+                        f"Available outputs: {available_outputs}"
+                    )
+
+                extracted_data = outputs[output_name]
+                extraction_path = f"calls.{task_name}[{execution.get('shardIndex', 0)}].outputs.{output_name}"
+
+            elif field_path:
+                # Dot-path extraction
+                ctx.info(f"Extracting field path: {field_path}")
+                extracted_data = _extract_field_by_path(metadata, field_path, ctx)
+                extraction_path = field_path
+
+            # Calculate size of extracted data
+            extracted_json = json.dumps(extracted_data, indent=2)
+            size_chars = len(extracted_json)
+            size_tokens = size_chars // 4
+
+            ctx.info(f"Extracted data: {size_chars} chars (~{size_tokens} tokens)")
+
+            return {
+                "mode": "extract",
+                "extracted_data": extracted_data,
+                "path_used": extraction_path,
+                "size_chars": size_chars,
+                "estimated_tokens": size_tokens,
+            }
 
         elif mode == "full_download":
             # Calculate size and provide warning
@@ -641,7 +818,7 @@ async def get_job_metadata(
 
         else:
             # Should never reach here due to Literal type, but just in case
-            raise ToolError(f"Invalid mode: {mode}. Must be 'summary', 'query', or 'full_download'")
+            raise ToolError(f"Invalid mode: {mode}. Must be 'summary', 'extract', or 'full_download'")
 
     except ToolError:
         raise

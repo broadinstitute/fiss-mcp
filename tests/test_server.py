@@ -521,21 +521,24 @@ class TestGetJobMetadata:
             assert failed_task["attempt"] == 1
 
     @pytest.mark.asyncio
-    async def test_query_mode_success(self):
-        """Test query mode with JMESPath expression"""
+    async def test_extract_mode_specific_output(self):
+        """Test extract mode with task_name and output_name"""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "id": "wf-456",
             "workflowName": "test_workflow",
-            "status": "Failed",
-            "failures": [
-                {"message": "Error 1", "causedBy": []},
-                {"message": "Error 2", "causedBy": []},
-            ],
+            "status": "Succeeded",
             "calls": {
-                "task1": [{"executionStatus": "Succeeded"}],
-                "task2": [{"executionStatus": "Failed"}],
+                "illumina_demux": [
+                    {
+                        "shardIndex": -1,
+                        "outputs": {
+                            "commonBarcodes": "gs://bucket/barcodes.txt",
+                            "metrics": "gs://bucket/metrics.txt",
+                        },
+                    }
+                ],
             },
         }
 
@@ -543,31 +546,38 @@ class TestGetJobMetadata:
             get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
 
             ctx = MagicMock()
-            # Test extracting failures with JMESPath
             result = await get_job_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 submission_id="sub-123",
                 workflow_id="wf-456",
                 ctx=ctx,
-                mode="query",
-                jmespath_query="failures[*].message",
+                mode="extract",
+                task_name="illumina_demux",
+                output_name="commonBarcodes",
             )
 
-            assert result["mode"] == "query"
-            assert result["query"] == "failures[*].message"
-            assert result["result"] == ["Error 1", "Error 2"]
+            assert result["mode"] == "extract"
+            assert result["extracted_data"] == "gs://bucket/barcodes.txt"
+            assert "commonBarcodes" in result["path_used"]
+            assert result["size_chars"] > 0
 
     @pytest.mark.asyncio
-    async def test_query_mode_discover_keys(self):
-        """Test query mode to discover available keys"""
+    async def test_extract_mode_with_shard_index(self):
+        """Test extract mode with shard_index parameter"""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "id": "wf-456",
             "workflowName": "test_workflow",
             "status": "Succeeded",
-            "calls": {},
+            "calls": {
+                "scatter_task": [
+                    {"shardIndex": 0, "outputs": {"result": "result_0"}},
+                    {"shardIndex": 1, "outputs": {"result": "result_1"}},
+                    {"shardIndex": 2, "outputs": {"result": "result_2"}},
+                ],
+            },
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
@@ -580,61 +590,102 @@ class TestGetJobMetadata:
                 submission_id="sub-123",
                 workflow_id="wf-456",
                 ctx=ctx,
-                mode="query",
-                jmespath_query="keys(@)",
+                mode="extract",
+                task_name="scatter_task",
+                shard_index=1,
+                output_name="result",
             )
 
-            assert result["mode"] == "query"
-            assert "id" in result["result"]
-            assert "workflowName" in result["result"]
-            assert "status" in result["result"]
+            assert result["mode"] == "extract"
+            assert result["extracted_data"] == "result_1"
 
     @pytest.mark.asyncio
-    async def test_query_mode_missing_jmespath(self):
-        """Test query mode fails without jmespath_query parameter"""
-        from fastmcp.exceptions import ToolError
-
+    async def test_extract_mode_field_path_wildcard(self):
+        """Test extract mode with field_path using wildcards"""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "Succeeded"}
+        mock_response.json.return_value = {
+            "id": "wf-456",
+            "workflowName": "test_workflow",
+            "status": "Succeeded",
+            "calls": {
+                "task1": [{"executionStatus": "Succeeded", "runtimeAttributes": {"cpu": 2, "memory": "4GB"}}],
+                "task2": [{"executionStatus": "Succeeded", "runtimeAttributes": {"cpu": 4, "memory": "8GB"}}],
+            },
+        }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
 
             ctx = MagicMock()
-            with pytest.raises(ToolError, match='mode="query" requires jmespath_query'):
+            result = await get_job_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                submission_id="sub-123",
+                workflow_id="wf-456",
+                ctx=ctx,
+                mode="extract",
+                field_path="calls.*[0].runtimeAttributes",
+            )
+
+            assert result["mode"] == "extract"
+            assert "task1" in result["extracted_data"]
+            assert "task2" in result["extracted_data"]
+            assert result["extracted_data"]["task1"]["cpu"] == 2
+            assert result["extracted_data"]["task2"]["cpu"] == 4
+
+    @pytest.mark.asyncio
+    async def test_extract_mode_missing_output(self):
+        """Test extract mode fails gracefully when output not found"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "wf-456",
+            "calls": {
+                "task1": [{"outputs": {"file1": "gs://bucket/file1.txt"}}],
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
+            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+
+            ctx = MagicMock()
+            with pytest.raises(ToolError, match="Output 'missing_output' not found"):
                 await get_job_metadata_fn(
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     submission_id="sub-123",
                     workflow_id="wf-456",
                     ctx=ctx,
-                    mode="query",
-                    # Missing jmespath_query
+                    mode="extract",
+                    task_name="task1",
+                    output_name="missing_output",
                 )
 
     @pytest.mark.asyncio
-    async def test_query_mode_invalid_jmespath(self):
-        """Test query mode with invalid JMESPath expression"""
+    async def test_extract_mode_missing_parameters(self):
+        """Test extract mode requires either output_name or field_path"""
         from fastmcp.exceptions import ToolError
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "Succeeded"}
+        mock_response.json.return_value = {"id": "wf-456", "calls": {}}
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
 
             ctx = MagicMock()
-            with pytest.raises(ToolError, match="Invalid JMESPath query"):
+            with pytest.raises(ToolError, match='mode="extract" requires either output_name'):
                 await get_job_metadata_fn(
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     submission_id="sub-123",
                     workflow_id="wf-456",
                     ctx=ctx,
-                    mode="query",
-                    jmespath_query="[invalid syntax",
+                    mode="extract",
+                    # Missing both output_name and field_path
                 )
 
     @pytest.mark.asyncio
@@ -674,40 +725,6 @@ class TestGetJobMetadata:
             assert "Write('/tmp/workflow_metadata.json'" in result["size_warning"]
             assert "jq" in result["size_warning"]
 
-    @pytest.mark.asyncio
-    async def test_task_name_filter(self):
-        """Test task_name parameter filters to specific task"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "id": "wf-456",
-            "workflowName": "test_workflow",
-            "status": "Succeeded",
-            "calls": {
-                "task1": [{"executionStatus": "Succeeded"}],
-                "task2": [{"executionStatus": "Failed"}],
-                "task3": [{"executionStatus": "Succeeded"}],
-            },
-        }
-
-        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
-
-            ctx = MagicMock()
-            result = await get_job_metadata_fn(
-                workspace_namespace="test-ns",
-                workspace_name="test-ws",
-                submission_id="sub-123",
-                workflow_id="wf-456",
-                ctx=ctx,
-                mode="summary",
-                task_name="task2",
-            )
-
-            # Verify only task2 is included
-            assert result["tasks"]["total"] == 1
-            assert result["tasks"]["by_status"]["Failed"] == 1
-            assert len(result["failed_tasks"]) == 1
 
 
 class TestGetWorkflowLogs:

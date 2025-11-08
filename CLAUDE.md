@@ -75,14 +75,14 @@ All planned tools have been successfully implemented following test-driven devel
    - **Summary mode (default)**: Returns structured summary (~1-2K tokens vs 100K+)
      - Workflow status, task counts by status, failed task details with errors
      - Optimized for LLM context efficiency
-   - **Query mode (JMESPath)**: Extract specific fields using JMESPath syntax
-     - Discover keys: `jmespath_query="keys(@)"` or `jmespath_query="calls | keys(@)"`
-     - Extract specific data: `jmespath_query="failures[*].message"`
-     - See https://jmespath.org for syntax reference
+   - **Extract mode (semantic parameters)**: Extract specific data without loading full metadata
+     - Semantic parameters: `task_name`, `output_name`, `shard_index` for intuitive extraction
+     - Dot-path notation: `field_path="calls.*[0].runtimeAttributes"` for flexible queries
+     - Supports wildcards for batch extraction across all tasks
+     - Returns only requested data with size metrics
    - **Full download mode**: Complete Cromwell JSON with size warnings
      - Includes guidance to write to temp file and explore with jq/grep
      - Prevents context exhaustion by encouraging file-based exploration
-   - **Task name filtering**: Optional `task_name` parameter works across all modes
 7. ✅ `get_workflow_logs` - Fetch stderr/stdout from GCS
    - Returns GCS URLs by default (fast)
    - `fetch_content=True` to fetch actual log content from GCS
@@ -208,25 +208,30 @@ All planned tools have been successfully implemented following test-driven devel
      - Workflow status, task counts, failed task details with errors
      - Helper function `_build_metadata_summary()` extracts actionable information
      - Perfect for initial debugging and understanding workflow state
-  2. **Query mode (JMESPath)**: Targeted field extraction
-     - Uses `jmespath` library (pure Python, safe, no code execution)
-     - Enables discovery: `keys(@)` shows available fields, `calls | keys(@)` lists tasks
-     - Extract specific data without loading full JSON into context
-     - Clear error messages for invalid queries with link to jmespath.org
+  2. **Extract mode (semantic parameters + dot-path)**: Targeted field extraction
+     - Semantic parameters match how agents think: `task_name="illumina_demux"`, `output_name="commonBarcodes"`
+     - Supports scatter/gather: `shard_index=5` to select specific shard
+     - Dot-path notation for flexible extraction: `field_path="calls.*[0].runtimeAttributes"`
+     - Wildcard support for batch extraction: `calls.*.runtimeAttributes` gets all task runtimes
+     - Custom dot-path parser (no external dependencies, no query language syntax to learn)
+     - Clear error messages show available options when paths fail
   3. **Full download mode**: Complete metadata with strong guidance
      - Returns full Cromwell JSON with size warnings (chars and estimated tokens)
      - **Critical safety feature**: Response includes explicit instructions to write to temp file
      - Recommends jq/grep workflow: write to `/tmp/workflow_metadata.json`, then explore
      - Prevents agents from naively reading 100K+ token responses into context
-- **Security considerations**:
-  - JMESPath is safe (no code execution, unlike full jq with shell access)
-  - Potential DOS from complex queries, but acceptable for authenticated MCP server use
-  - No injection vulnerabilities - JMESPath is a query language, not executable code
+- **Why semantic parameters instead of JMESPath**:
+  - LLM agents struggled with JMESPath syntax despite documentation
+  - Semantic parameters are intuitive and discoverable via type hints
+  - Dot-path notation is simpler and matches how agents reference JSON in conversation
+  - No external library dependency, smaller attack surface
+  - Better error messages with available options (shows task names, output names, etc.)
 - **Discoverability for LLM agents**:
   - Mode parameter uses `Literal` type hints - visible in tool schema
-  - Rich docstring with clear usage patterns and examples
+  - Rich docstring with clear usage patterns and real-world examples
   - Default mode (summary) is safest and most useful
   - Warning messages guide agents away from dangerous patterns
+  - Parameter validation provides helpful suggestions when mistakes occur
 
 ### FISS API Quirks & Debugging
 - **Critical bug**: `include_key` parameter in `get_workflow_metadata` returns empty nested data
@@ -260,7 +265,7 @@ All planned tools have been successfully implemented following test-driven devel
 - **Context size optimization**: Default to minimal responses to avoid exhausting LLM context
   - `get_job_metadata` uses progressive disclosure with three modes:
     - **Summary mode (default)**: Structured summary optimized for LLMs (~1-2K tokens vs 100K+)
-    - **Query mode**: JMESPath queries to extract specific fields without loading full metadata
+    - **Extract mode**: Semantic parameters + dot-path notation to extract only needed data
     - **Full download mode**: Complete JSON with warnings and guidance to write to temp file
   - `get_submission_status` omits `inputResolutions` by default (94% size reduction: 30K→1.7K tokens for 9 workflows)
     - Set `include_inputs=True` to see full workflow input values when debugging
