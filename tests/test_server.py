@@ -698,43 +698,6 @@ class TestGetJobMetadata:
                     # Missing both output_name and field_path
                 )
 
-    @pytest.mark.asyncio
-    async def test_full_download_mode(self):
-        """Test full_download mode returns complete metadata with warnings"""
-        mock_metadata = {
-            "id": "wf-456",
-            "workflowName": "test_workflow",
-            "status": "Succeeded",
-            "calls": {f"task{i}": [{"executionStatus": "Succeeded"}] for i in range(50)},
-        }
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_metadata
-
-        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
-
-            ctx = MagicMock()
-            result = await get_job_metadata_fn(
-                workspace_namespace="test-ns",
-                workspace_name="test-ws",
-                submission_id="sub-123",
-                workflow_id="wf-456",
-                ctx=ctx,
-                mode="full_download",
-            )
-
-            # Verify response structure
-            assert result["mode"] == "full_download"
-            assert "size_warning" in result
-            assert "size_chars" in result
-            assert "estimated_tokens" in result
-            assert result["metadata"] == mock_metadata
-
-            # Verify warning contains helpful guidance
-            assert "Write('/tmp/workflow_metadata.json'" in result["size_warning"]
-            assert "jq" in result["size_warning"]
-
 
 class TestGetWorkflowLogs:
     """Test get_workflow_logs tool"""

@@ -202,8 +202,8 @@ All planned tools have been successfully implemented following test-driven devel
 - Handle GCS fetch failures gracefully (return None, log error)
 
 ### Progressive Disclosure Pattern for get_job_metadata
-- **Design goal**: Prevent LLM context exhaustion while allowing full data access when needed
-- **Three-mode approach optimized for LLM agents**:
+- **Design goal**: Prevent LLM context exhaustion by forcing agents to request only what they need
+- **Two-mode approach optimized for LLM agents**:
   1. **Summary mode (default)**: Structured, semantic summary (~1-2K tokens)
      - Workflow status, task counts, failed task details with errors
      - Helper function `_build_metadata_summary()` extracts actionable information
@@ -215,11 +215,8 @@ All planned tools have been successfully implemented following test-driven devel
      - Wildcard support for batch extraction: `calls.*.runtimeAttributes` gets all task runtimes
      - Custom dot-path parser (no external dependencies, no query language syntax to learn)
      - Clear error messages show available options when paths fail
-  3. **Full download mode**: Complete metadata with strong guidance
-     - Returns full Cromwell JSON with size warnings (chars and estimated tokens)
-     - **Critical safety feature**: Response includes explicit instructions to write to temp file
-     - Recommends jq/grep workflow: write to `/tmp/workflow_metadata.json`, then explore
-     - Prevents agents from naively reading 100K+ token responses into context
+     - Agents should make multiple extract calls if they need several pieces of data
+- **No full download mode**: Originally included as an "escape hatch", but agents would use it and blow up their context. Removed to prevent footgun scenario. Everything is accessible via extract mode.
 - **Why semantic parameters instead of JMESPath**:
   - LLM agents struggled with JMESPath syntax despite documentation
   - Semantic parameters are intuitive and discoverable via type hints
@@ -263,10 +260,10 @@ All planned tools have been successfully implemented following test-driven devel
 - Validation before API calls to catch errors early
 - Consistent response formats across all tools
 - **Context size optimization**: Default to minimal responses to avoid exhausting LLM context
-  - `get_job_metadata` uses progressive disclosure with three modes:
+  - `get_job_metadata` uses progressive disclosure with two modes:
     - **Summary mode (default)**: Structured summary optimized for LLMs (~1-2K tokens vs 100K+)
     - **Extract mode**: Semantic parameters + dot-path notation to extract only needed data
-    - **Full download mode**: Complete JSON with warnings and guidance to write to temp file
+    - Agents should make multiple extract calls if they need several pieces of data
   - `get_submission_status` omits `inputResolutions` by default (94% size reduction: 30K→1.7K tokens for 9 workflows)
     - Set `include_inputs=True` to see full workflow input values when debugging
     - Real-world impact: Critical for submissions with many workflows to avoid context exhaustion

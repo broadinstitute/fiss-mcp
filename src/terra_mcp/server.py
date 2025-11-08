@@ -587,8 +587,8 @@ async def get_job_metadata(
     workflow_id: Annotated[str, "Workflow identifier (UUID)"],
     ctx: Context,
     mode: Annotated[
-        Literal["summary", "extract", "full_download"],
-        'Mode: "summary" (default), "extract" (specific fields), or "full_download" (complete JSON)',
+        Literal["summary", "extract"],
+        'Mode: "summary" (default) or "extract" (specific fields)',
     ] = "summary",
     task_name: Annotated[
         str | None,
@@ -631,24 +631,15 @@ async def get_job_metadata(
        - Use [N] for array indexing: "calls.task1[0].outputs"
        - Use * for wildcards: "calls.*.executionStatus"
 
-    3. LAST RESORT - full_download mode:
-       ⚠️  WARNING: Complete Cromwell JSON can be 100K-500K+ tokens
-
-       **CRITICAL: Do NOT read full metadata into your context!**
-
-       Recommended workflow:
-         1. Call get_job_metadata(..., mode="full_download")
-         2. Write response["metadata"] to /tmp/workflow_metadata.json
-         3. Explore with tools: jq, grep, or Read with offset/limit
-
-       Only use if extract mode cannot get what you need.
+       If you need multiple pieces of data, make multiple extract calls rather than
+       trying to get everything at once. This prevents context exhaustion.
 
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         submission_id: The submission UUID containing this workflow
         workflow_id: The workflow UUID to get metadata for
-        mode: "summary" | "extract" | "full_download" (default: "summary")
+        mode: "summary" | "extract" (default: "summary")
         task_name: Filter to specific task (required for output_name)
         shard_index: Specific scatter shard (optional, use with task_name)
         output_name: Specific output variable name (requires task_name)
@@ -658,7 +649,6 @@ async def get_job_metadata(
         Dictionary with mode-specific structure:
         - summary: Structured summary with workflow status, task counts, failures
         - extract: Extracted data with size info
-        - full_download: Complete Cromwell metadata with size warning
     """
     try:
         # Validate parameters
@@ -794,39 +784,9 @@ async def get_job_metadata(
                 "estimated_tokens": size_tokens,
             }
 
-        elif mode == "full_download":
-            # Calculate size and provide warning
-            metadata_json = json.dumps(metadata)
-            size_chars = len(metadata_json)
-            size_tokens = size_chars // 4  # Rough estimate
-
-            ctx.warning(
-                f"Returning full metadata: {size_chars:,} characters (~{size_tokens:,} tokens)"
-            )
-
-            warning_msg = (
-                f"⚠️  Full metadata is {size_chars:,} characters (~{size_tokens:,} tokens). "
-                "Reading this into your context may exhaust your token budget! "
-                "\n\nRECOMMENDED: Write to /tmp/workflow_metadata.json and explore with jq/grep:\n"
-                "  1. Write('/tmp/workflow_metadata.json', response['metadata'])\n"
-                "  2. Bash('jq \".calls | keys\" /tmp/workflow_metadata.json')  # List tasks\n"
-                "  3. Bash('jq \".failures\" /tmp/workflow_metadata.json')  # See failures\n"
-                "  4. Read('/tmp/workflow_metadata.json', offset=X, limit=Y)  # View sections"
-            )
-
-            return {
-                "mode": "full_download",
-                "size_warning": warning_msg,
-                "size_chars": size_chars,
-                "estimated_tokens": size_tokens,
-                "metadata": metadata,
-            }
-
         else:
             # Should never reach here due to Literal type, but just in case
-            raise ToolError(
-                f"Invalid mode: {mode}. Must be 'summary', 'extract', or 'full_download'"
-            )
+            raise ToolError(f"Invalid mode: {mode}. Must be 'summary' or 'extract'")
 
     except ToolError:
         raise
