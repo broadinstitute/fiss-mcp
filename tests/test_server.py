@@ -609,8 +609,18 @@ class TestGetJobMetadata:
             "workflowName": "test_workflow",
             "status": "Succeeded",
             "calls": {
-                "task1": [{"executionStatus": "Succeeded", "runtimeAttributes": {"cpu": 2, "memory": "4GB"}}],
-                "task2": [{"executionStatus": "Succeeded", "runtimeAttributes": {"cpu": 4, "memory": "8GB"}}],
+                "task1": [
+                    {
+                        "executionStatus": "Succeeded",
+                        "runtimeAttributes": {"cpu": 2, "memory": "4GB"},
+                    }
+                ],
+                "task2": [
+                    {
+                        "executionStatus": "Succeeded",
+                        "runtimeAttributes": {"cpu": 4, "memory": "8GB"},
+                    }
+                ],
             },
         }
 
@@ -724,7 +734,6 @@ class TestGetJobMetadata:
             # Verify warning contains helpful guidance
             assert "Write('/tmp/workflow_metadata.json'" in result["size_warning"]
             assert "jq" in result["size_warning"]
-
 
 
 class TestGetWorkflowLogs:

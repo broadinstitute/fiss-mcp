@@ -295,7 +295,11 @@ def _extract_field_by_path(data: Any, path: str, ctx: Context) -> Any:
                 )
 
             # Apply remaining path to each value
-            remaining_path = ".".join(parts[parts.index(part) + 1 :]) if parts.index(part) < len(parts) - 1 else ""
+            remaining_path = (
+                ".".join(parts[parts.index(part) + 1 :])
+                if parts.index(part) < len(parts) - 1
+                else ""
+            )
 
             wildcard_results = {}
             for key, value in result.items():
@@ -765,7 +769,9 @@ async def get_job_metadata(
                     )
 
                 extracted_data = outputs[output_name]
-                extraction_path = f"calls.{task_name}[{execution.get('shardIndex', 0)}].outputs.{output_name}"
+                extraction_path = (
+                    f"calls.{task_name}[{execution.get('shardIndex', 0)}].outputs.{output_name}"
+                )
 
             elif field_path:
                 # Dot-path extraction
@@ -818,7 +824,9 @@ async def get_job_metadata(
 
         else:
             # Should never reach here due to Literal type, but just in case
-            raise ToolError(f"Invalid mode: {mode}. Must be 'summary', 'extract', or 'full_download'")
+            raise ToolError(
+                f"Invalid mode: {mode}. Must be 'summary', 'extract', or 'full_download'"
+            )
 
     except ToolError:
         raise
