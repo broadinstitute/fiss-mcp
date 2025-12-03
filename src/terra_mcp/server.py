@@ -6,6 +6,7 @@ Provides tools for listing workspaces, querying data tables, and monitoring work
 
 import argparse
 import json
+import sys
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
@@ -1930,10 +1931,10 @@ Examples:
     ALLOW_WRITES = args.allow_writes
 
     if ALLOW_WRITES:
-        print("⚠️  Write operations ENABLED - server can modify Terra workspaces", flush=True)
+        print("⚠️  Write operations ENABLED - server can modify Terra workspaces", file=sys.stderr, flush=True)
     else:
-        print("✓ Read-only mode - write operations are disabled for safety", flush=True)
-        print("  Use --allow-writes flag to enable write operations", flush=True)
+        print("✓ Read-only mode - write operations are disabled for safety", file=sys.stderr, flush=True)
+        print("  Use --allow-writes flag to enable write operations", file=sys.stderr, flush=True)
 
     # Run server with stdio transport (compatible with Claude Desktop)
     mcp.run()
