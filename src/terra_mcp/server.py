@@ -1950,9 +1950,17 @@ Examples:
     ALLOW_WRITES = args.allow_writes
 
     if ALLOW_WRITES:
-        print("⚠️  Write operations ENABLED - server can modify Terra workspaces", file=sys.stderr, flush=True)
+        print(
+            "⚠️  Write operations ENABLED - server can modify Terra workspaces",
+            file=sys.stderr,
+            flush=True,
+        )
     else:
-        print("✓ Read-only mode - write operations are disabled for safety", file=sys.stderr, flush=True)
+        print(
+            "✓ Read-only mode - write operations are disabled for safety",
+            file=sys.stderr,
+            flush=True,
+        )
         print("  Use --allow-writes flag to enable write operations", file=sys.stderr, flush=True)
 
     # Run server with stdio transport (compatible with Claude Desktop)
