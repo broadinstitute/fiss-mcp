@@ -471,6 +471,12 @@ async def get_submission_status(
     Returns detailed status information including overall submission status, workflow counts,
     and a summary of workflow states (Succeeded, Failed, Running, etc.).
 
+    **EFFICIENT DEBUGGING SEQUENCE (prevents context exhaustion):**
+    1. get_submission_status → identify failed workflow IDs from status_summary
+    2. get_job_metadata (summary mode) → see failed tasks with error messages (~1-2K tokens)
+    3. get_workflow_logs (URLs only) → locate log file paths without fetching content
+    4. get_workflow_logs (fetch specific) → fetch content only for failed tasks you need
+
     By default, returns the first 10 workflows for readability. Use max_workflows=0 or
     max_workflows=None to retrieve all workflows if needed for detailed analysis.
 
@@ -826,6 +832,13 @@ async def get_workflow_logs(
     With fetch_content=True, fetches the actual log content from GCS. Logs are truncated
     by default using a smart strategy (first 5K + last 20K chars) to keep error messages
     while providing context. Set truncate=False to get full logs.
+
+    **CONTEXT WARNING FOR SCATTERED WORKFLOWS:**
+    If the workflow uses scatter/gather with many shards (50+), fetching all log content
+    can quickly exhaust LLM context. Recommended approach:
+    1. First call with fetch_content=False to get URLs only (fast, small response)
+    2. Use get_job_metadata in summary mode to identify which tasks/shards failed
+    3. Then fetch content only for the specific failed tasks you need to debug
 
     This tool is useful for:
     - Debugging workflow failures (fetch stderr with truncation)
@@ -1245,6 +1258,12 @@ async def get_entities(
 
     Entities represent rows in Terra data tables and are used as workflow inputs.
     This tool retrieves all entities of a given type along with their attributes.
+
+    **CONTEXT WARNING FOR LARGE TABLES:**
+    Data tables can contain thousands of entities, each with many attributes.
+    Before calling this tool, use get_workspace_data_tables to check row counts.
+    For tables with 100+ entities, consider whether you truly need all data,
+    or if you can work with specific entity names from workflow inputs instead.
 
     Common use cases:
     - Retrieve sample/participant data for workflow submission
