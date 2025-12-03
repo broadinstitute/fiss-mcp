@@ -1,0 +1,18 @@
+coverage:
+  status:
+    project:
+      default:
+        # Require overall project coverage to not drop
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # Be lenient on patch coverage - docstrings and __main__ blocks
+        # don't need test coverage
+        target: auto
+        threshold: 50%
+        informational: true  # Don't fail PR checks
+
+# Ignore files that don't need coverage
+ignore:
+  - "**/__main__.py"
