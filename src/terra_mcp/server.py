@@ -6,13 +6,14 @@ Provides tools for listing workspaces, querying data tables, and monitoring work
 
 import argparse
 import json
+import re
 import sys
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from firecloud import api as fapi
-from google.cloud import storage
+from google.cloud import batch_v1, storage
 
 # Global flag to control write access (default: read-only mode)
 ALLOW_WRITES = False
@@ -332,6 +333,404 @@ def _extract_field_by_path(data: Any, path: str, ctx: Context) -> Any:
                 )
 
     return result
+
+
+# ===== Google Batch API Helper Functions =====
+
+
+# Lazily initialized Batch client
+_batch_client: batch_v1.BatchServiceClient | None = None
+
+
+def _get_batch_client() -> batch_v1.BatchServiceClient:
+    """Get or create Google Batch API client.
+
+    Uses lazy initialization to avoid creating the client until needed.
+    Uses default application credentials for authentication.
+
+    Returns:
+        Configured BatchServiceClient
+    """
+    global _batch_client
+    if _batch_client is None:
+        _batch_client = batch_v1.BatchServiceClient()
+    return _batch_client
+
+
+def _extract_batch_job_id(execution: dict[str, Any]) -> str | None:
+    """Extract Google Batch job ID from Cromwell execution metadata.
+
+    The job ID is stored in the 'jobId' field of the execution metadata
+    and contains the full Batch job path like:
+    projects/<project>/locations/<region>/jobs/<job-name>
+
+    Args:
+        execution: Task execution metadata from Cromwell
+
+    Returns:
+        Batch job ID string, or None if not found
+    """
+    # Primary location based on real Cromwell metadata
+    if "jobId" in execution:
+        return execution["jobId"]
+    return None
+
+
+def _parse_batch_job_status(job: batch_v1.Job) -> dict[str, Any]:
+    """Parse Google Batch Job object into structured dictionary.
+
+    Converts the protobuf Job object into a JSON-serializable dict
+    with relevant status information.
+
+    Args:
+        job: Google Batch Job object
+
+    Returns:
+        Dictionary containing:
+        - job_name: Full resource name
+        - job_uid: Unique identifier (for Cloud Logging queries)
+        - status: Current state (QUEUED, RUNNING, SUCCEEDED, FAILED, etc.)
+        - create_time: Job creation timestamp
+        - update_time: Last update timestamp
+        - timing: {run_duration, pre_run_duration}
+        - resources: {machine_type, cpu, memory_mib, boot_disk_mib, data_disks_mib}
+        - status_events: List of status events with type, description, time
+        - task_counts: Summary of task states
+    """
+    # Parse status events
+    status_events = []
+    running_start_time = None
+    first_event_time = None
+
+    if job.status and job.status.status_events:
+        for event in job.status.status_events:
+            event_time = None
+            if event.event_time:
+                event_time = (
+                    event.event_time.isoformat()
+                    if hasattr(event.event_time, "isoformat")
+                    else str(event.event_time)
+                )
+
+                # Track first event time for pre_run_duration calculation
+                if first_event_time is None:
+                    first_event_time = event.event_time
+
+                # Check if this event marks transition to RUNNING
+                desc_lower = event.description.lower() if event.description else ""
+                if "running" in desc_lower and "-> running" in desc_lower:
+                    running_start_time = event.event_time
+
+            status_events.append(
+                {
+                    "time": event_time,
+                    "type": event.type_ if hasattr(event, "type_") else str(event.type),
+                    "description": event.description,
+                }
+            )
+
+    # Calculate timing
+    run_duration = None
+    if job.status and job.status.run_duration:
+        # Format duration as string (e.g., "62.925s")
+        total_seconds = job.status.run_duration.total_seconds()
+        run_duration = f"{total_seconds:.3f}s"
+
+    pre_run_duration = None
+    if first_event_time and running_start_time:
+        try:
+            # Calculate time from first event to RUNNING state
+            if hasattr(first_event_time, "timestamp") and hasattr(running_start_time, "timestamp"):
+                pre_run_seconds = running_start_time.timestamp() - first_event_time.timestamp()
+                if pre_run_seconds >= 0:
+                    pre_run_duration = f"{pre_run_seconds:.3f}s"
+        except (AttributeError, TypeError):
+            pass  # Skip if timestamps can't be compared
+
+    # Parse task counts from task groups
+    task_counts: dict[str, int] = {}
+    if job.status and job.status.task_groups:
+        for task_group_id, task_group_status in job.status.task_groups.items():
+            if task_group_status.counts:
+                for state, count in task_group_status.counts.items():
+                    task_counts[state] = task_counts.get(state, 0) + count
+
+    # Get state name
+    state_name = "UNKNOWN"
+    if job.status and job.status.state:
+        state_name = batch_v1.JobStatus.State(job.status.state).name
+
+    # Format timestamps
+    create_time = None
+    if job.create_time:
+        create_time = (
+            job.create_time.isoformat()
+            if hasattr(job.create_time, "isoformat")
+            else str(job.create_time)
+        )
+
+    update_time = None
+    if job.update_time:
+        update_time = (
+            job.update_time.isoformat()
+            if hasattr(job.update_time, "isoformat")
+            else str(job.update_time)
+        )
+
+    # Extract resource allocation information
+    resources: dict[str, Any] = {
+        "machine_type": None,
+        "cpu": None,
+        "memory_mib": None,
+        "boot_disk_mib": None,
+        "data_disks_mib": None,
+    }
+
+    # Get machine type from allocation policy
+    if job.allocation_policy and job.allocation_policy.instances:
+        for instance in job.allocation_policy.instances:
+            if instance.policy and instance.policy.machine_type:
+                resources["machine_type"] = instance.policy.machine_type
+                break
+            # Also check instance_template for machine type
+            if instance.instance_template:
+                resources["machine_type"] = f"template:{instance.instance_template}"
+                break
+
+    # Get CPU and memory from task groups
+    if job.task_groups:
+        for task_group in job.task_groups:
+            if task_group.task_spec and task_group.task_spec.compute_resource:
+                compute = task_group.task_spec.compute_resource
+                if compute.cpu_milli:
+                    # Convert millicores to whole CPUs
+                    resources["cpu"] = compute.cpu_milli // 1000
+                if compute.memory_mib:
+                    resources["memory_mib"] = compute.memory_mib
+                break  # Use first task group's resources
+
+    # Get disk information from allocation policy and task spec
+    boot_disk_mib = None
+    data_disks_mib = 0
+
+    # Check allocation policy for boot disk
+    if job.allocation_policy and job.allocation_policy.instances:
+        for instance in job.allocation_policy.instances:
+            if instance.policy and instance.policy.boot_disk:
+                boot_disk = instance.policy.boot_disk
+                if boot_disk.size_gb:
+                    boot_disk_mib = boot_disk.size_gb * 1024
+                break
+
+    # Check task spec volumes for additional disks
+    if job.task_groups:
+        for task_group in job.task_groups:
+            if task_group.task_spec and task_group.task_spec.volumes:
+                for volume in task_group.task_spec.volumes:
+                    # Check for persistent disk or local SSD
+                    disk_size_gb = None
+                    is_boot = False
+
+                    if hasattr(volume, "device_name") and volume.device_name:
+                        # Boot disk typically has specific device names
+                        is_boot = "boot" in volume.device_name.lower()
+
+                    # Get disk size from various possible locations
+                    if hasattr(volume, "disk") and volume.disk:
+                        if hasattr(volume.disk, "size_gb") and volume.disk.size_gb:
+                            disk_size_gb = volume.disk.size_gb
+
+                    if disk_size_gb:
+                        if is_boot and boot_disk_mib is None:
+                            boot_disk_mib = disk_size_gb * 1024
+                        elif not is_boot:
+                            data_disks_mib += disk_size_gb * 1024
+
+    if boot_disk_mib is not None:
+        resources["boot_disk_mib"] = boot_disk_mib
+    if data_disks_mib > 0:
+        resources["data_disks_mib"] = data_disks_mib
+
+    return {
+        "job_name": job.name,
+        "job_uid": job.uid,
+        "status": state_name,
+        "create_time": create_time,
+        "update_time": update_time,
+        "timing": {
+            "run_duration": run_duration,
+            "pre_run_duration": pre_run_duration,
+        },
+        "resources": resources,
+        "status_events": status_events,
+        "task_counts": task_counts,
+    }
+
+
+def _detect_batch_issues(status_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Analyze status events to detect common infrastructure issues.
+
+    Scans status event descriptions for patterns that indicate
+    specific infrastructure problems.
+
+    Args:
+        status_events: List of parsed status events from _parse_batch_job_status
+
+    Returns:
+        List of detected issues, each containing:
+        - issue_type: Category (docker_pull, preemption, oom_killed, etc.)
+        - description: Human-readable description
+        - severity: "error", "warning", or "info"
+        - suggestion: Recommended action
+        - event_description: The original event description that triggered detection
+    """
+    issues: list[dict[str, Any]] = []
+    seen_types: set[str] = set()  # Avoid duplicate issue types
+
+    for event in status_events:
+        desc = event.get("description", "") or ""
+        desc_lower = desc.lower()
+
+        # Docker pull failures
+        if "docker_pull" not in seen_types:
+            if any(
+                pattern in desc_lower
+                for pattern in [
+                    "failed to pull image",
+                    "image not found",
+                    "manifest unknown",
+                    "pull access denied",
+                ]
+            ):
+                issues.append(
+                    {
+                        "issue_type": "docker_pull_failure",
+                        "description": "Docker image pull failed",
+                        "severity": "error",
+                        "suggestion": "Check image name/tag spelling, verify registry access, "
+                        "and ensure service account has pull permissions",
+                        "event_description": desc,
+                    }
+                )
+                seen_types.add("docker_pull")
+
+            elif "429" in desc or "too many requests" in desc_lower or "rate limit" in desc_lower:
+                issues.append(
+                    {
+                        "issue_type": "docker_pull_rate_limit",
+                        "description": "Docker registry rate limit exceeded",
+                        "severity": "error",
+                        "suggestion": "Wait and retry, or use authenticated pulls to increase limits",
+                        "event_description": desc,
+                    }
+                )
+                seen_types.add("docker_pull")
+
+            elif "unauthorized" in desc_lower and "pull" in desc_lower:
+                issues.append(
+                    {
+                        "issue_type": "docker_pull_unauthorized",
+                        "description": "Unauthorized to pull Docker image",
+                        "severity": "error",
+                        "suggestion": "Check service account permissions for the container registry",
+                        "event_description": desc,
+                    }
+                )
+                seen_types.add("docker_pull")
+
+        # Preemption
+        if "preemption" not in seen_types and "preempted" in desc_lower:
+            issues.append(
+                {
+                    "issue_type": "preemption",
+                    "description": "VM was preempted before task completed",
+                    "severity": "warning",
+                    "suggestion": "Task will be automatically retried. Consider using non-preemptible "
+                    "VMs for time-sensitive workloads",
+                    "event_description": desc,
+                }
+            )
+            seen_types.add("preemption")
+
+        # OOM killed (exit code 137)
+        if "oom" not in seen_types:
+            if (
+                "exit code 137" in desc_lower
+                or "oom" in desc_lower
+                or "out of memory" in desc_lower
+            ):
+                issues.append(
+                    {
+                        "issue_type": "oom_killed",
+                        "description": "Task was killed due to out-of-memory",
+                        "severity": "error",
+                        "suggestion": "Increase memory allocation in WDL runtime section",
+                        "event_description": desc,
+                    }
+                )
+                seen_types.add("oom")
+
+        # Resource/quota exhaustion
+        if "quota" not in seen_types:
+            if any(
+                pattern in desc_lower
+                for pattern in [
+                    "quota",
+                    "insufficient",
+                    "resource exhausted",
+                    "exceeded",
+                ]
+            ):
+                issues.append(
+                    {
+                        "issue_type": "resource_exhaustion",
+                        "description": "Resource quota or limit exceeded",
+                        "severity": "error",
+                        "suggestion": "Request quota increase or reduce resource requirements",
+                        "event_description": desc,
+                    }
+                )
+                seen_types.add("quota")
+
+        # Network issues
+        if "network" not in seen_types:
+            if any(
+                pattern in desc_lower
+                for pattern in [
+                    "network",
+                    "connection refused",
+                    "connection timeout",
+                    "dns",
+                ]
+            ):
+                issues.append(
+                    {
+                        "issue_type": "network_error",
+                        "description": "Network connectivity issue",
+                        "severity": "error",
+                        "suggestion": "Check VPC configuration, firewall rules, and network connectivity",
+                        "event_description": desc,
+                    }
+                )
+                seen_types.add("network")
+
+        # Generic exit code errors (only if no other issues detected)
+        if not seen_types:
+            exit_code_match = re.search(r"exit code (\d+)", desc_lower)
+            if exit_code_match:
+                exit_code = int(exit_code_match.group(1))
+                if exit_code != 0:
+                    issues.append(
+                        {
+                            "issue_type": f"exit_code_{exit_code}",
+                            "description": f"Task exited with code {exit_code}",
+                            "severity": "error",
+                            "suggestion": "Check stderr logs for application-level errors",
+                            "event_description": desc,
+                        }
+                    )
+
+    return issues
 
 
 # ===== Phase 1: Read-Only Tools =====
@@ -1241,6 +1640,265 @@ async def get_workflow_cost(
         ctx.error(f"Unexpected error fetching workflow cost: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to fetch cost for workflow {workflow_id} in submission {submission_id}"
+        )
+
+
+@mcp.tool()
+async def get_batch_job_status(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    submission_id: Annotated[str, "Submission identifier (UUID)"],
+    workflow_id: Annotated[str, "Workflow identifier (UUID)"],
+    task_name: Annotated[
+        str,
+        "Task name (short or fully qualified, e.g., 'deplete' or 'workflow.deplete')",
+    ],
+    ctx: Context,
+    shard_index: Annotated[
+        int | None,
+        "Shard index for scattered tasks (default: latest/only shard)",
+    ] = None,
+    attempt: Annotated[
+        int | None,
+        "Attempt number (default: latest attempt)",
+    ] = None,
+) -> dict[str, Any]:
+    """Get Google Batch job status for debugging infrastructure failures.
+
+    When Terra workflows fail due to infrastructure issues (docker pull errors,
+    VM provisioning, preemption), error details are NOT in standard GCS stderr logs.
+    This tool retrieves those details from the Google Batch API.
+
+    **CONTEXT SIZE:** Response is typically 2-3K tokens. Safe to call without
+    context exhaustion concerns.
+
+    **RECOMMENDED DEBUGGING WORKFLOW:**
+    1. get_submission_status -> identify failed workflows
+    2. get_job_metadata (summary mode) -> identify failed tasks
+    3. get_workflow_logs -> check stderr for application errors
+    4. get_batch_job_status -> check infrastructure issues if logs don't explain failure
+
+    **Signs you need this tool:**
+    - Batch reports exit code 0 but task is marked failed
+    - Error says "The job was stopped before the command finished"
+    - stderr is empty or very short
+    - Task failed instantly (0 seconds runtime)
+
+    **What this tool detects:**
+    - Docker image pull failures (rate limits, not found, auth errors)
+    - VM preemption events
+    - OOM kills (exit code 137)
+    - Resource/quota exhaustion
+    - Network connectivity issues
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+        submission_id: The submission UUID containing this workflow
+        workflow_id: The workflow UUID containing the failed task
+        task_name: Task name to get status for (short name or fully qualified)
+        shard_index: Specific shard for scattered tasks (default: latest/only)
+        attempt: Specific attempt number (default: latest attempt)
+
+    Returns:
+        Dictionary containing:
+        - workflow_id: The workflow UUID
+        - task_name: Matched task name (fully qualified)
+        - shard_index: The shard index (-1 if not scattered)
+        - attempt: The attempt number
+        - batch_job: Job details including:
+            - job_name: Full GCP resource path
+            - job_uid: UID for Cloud Logging queries
+            - status: QUEUED, SCHEDULED, RUNNING, SUCCEEDED, or FAILED
+            - timing: {run_duration, pre_run_duration} - run time vs queue/setup time
+            - resources: {machine_type, cpu, memory_mib, boot_disk_mib, data_disks_mib}
+            - status_events: List of state transitions with timestamps
+            - task_counts: Count of tasks by status
+        - detected_issues: Auto-detected issues with severity and suggestions
+        - summary: Human-readable one-line summary
+        - cloud_logging_query: Ready-to-use gcloud command for deeper debugging
+    """
+    try:
+        ctx.info(f"Fetching Batch job status for task '{task_name}' in workflow {workflow_id}")
+
+        # Step 1: Fetch workflow metadata to get the jobId
+        # Exclude large fields we don't need
+        response = fapi.get_workflow_metadata(
+            workspace_namespace,
+            workspace_name,
+            submission_id,
+            workflow_id,
+            exclude_key=["submittedFiles", "inputs", "outputs"],
+        )
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workflow '{workflow_id}' not found in submission '{submission_id}' "
+                f"for workspace '{workspace_namespace}/{workspace_name}'. "
+                "Please verify the workflow ID and submission ID are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this workflow."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(f"Failed to fetch workflow metadata (HTTP {response.status_code}).")
+
+        metadata = response.json()
+        workflow_name = metadata.get("workflowName", "")
+        calls = metadata.get("calls", {})
+
+        if not calls:
+            raise ToolError(
+                f"No task executions found in workflow {workflow_id}. "
+                "The workflow may not have started executing tasks yet."
+            )
+
+        # Step 2: Find the matching task
+        # Support both short names ("deplete") and fully qualified ("workflow.deplete")
+        matched_task_name = None
+        task_executions = None
+
+        # First try exact match
+        if task_name in calls:
+            matched_task_name = task_name
+            task_executions = calls[task_name]
+        else:
+            # Try with workflow prefix
+            qualified_name = f"{workflow_name}.{task_name}"
+            if qualified_name in calls:
+                matched_task_name = qualified_name
+                task_executions = calls[qualified_name]
+            else:
+                # Search for partial match
+                for call_name in calls:
+                    if call_name.endswith(f".{task_name}"):
+                        matched_task_name = call_name
+                        task_executions = calls[call_name]
+                        break
+
+        if matched_task_name is None:
+            available_tasks = list(calls.keys())[:10]
+            raise ToolError(
+                f"Task '{task_name}' not found in workflow. "
+                f"Available tasks: {available_tasks}"
+                f"{'...' if len(calls) > 10 else ''}"
+            )
+
+        # Step 3: Select the correct shard and attempt
+        if not task_executions:
+            raise ToolError(f"No executions found for task '{matched_task_name}'")
+
+        # Filter by shard if specified
+        if shard_index is not None:
+            shard_executions = [
+                ex for ex in task_executions if ex.get("shardIndex", -1) == shard_index
+            ]
+            if not shard_executions:
+                available_shards = sorted(set(ex.get("shardIndex", -1) for ex in task_executions))
+                raise ToolError(
+                    f"Shard index {shard_index} not found for task '{matched_task_name}'. "
+                    f"Available shards: {available_shards}"
+                )
+            task_executions = shard_executions
+
+        # Select by attempt (default to latest)
+        if attempt is not None:
+            attempt_executions = [ex for ex in task_executions if ex.get("attempt", 1) == attempt]
+            if not attempt_executions:
+                available_attempts = sorted(set(ex.get("attempt", 1) for ex in task_executions))
+                raise ToolError(
+                    f"Attempt {attempt} not found for task '{matched_task_name}'. "
+                    f"Available attempts: {available_attempts}"
+                )
+            execution = attempt_executions[0]
+        else:
+            # Use the last execution (latest attempt)
+            execution = task_executions[-1]
+
+        actual_shard = execution.get("shardIndex", -1)
+        actual_attempt = execution.get("attempt", 1)
+
+        # Step 4: Extract the Batch job ID
+        job_id = _extract_batch_job_id(execution)
+
+        if not job_id:
+            # List available fields for debugging
+            available_fields = list(execution.keys())[:15]
+            raise ToolError(
+                f"No Batch job ID found for task '{matched_task_name}' "
+                f"(shard={actual_shard}, attempt={actual_attempt}). "
+                f"This task may have been run on a different backend. "
+                f"Available metadata fields: {available_fields}"
+            )
+
+        ctx.info(f"Found Batch job ID: {job_id}")
+
+        # Step 5: Query Google Batch API
+        try:
+            client = _get_batch_client()
+            batch_job = client.get_job(name=job_id)
+        except Exception as e:
+            error_str = str(e).lower()
+            if "not found" in error_str or "404" in error_str:
+                raise ToolError(
+                    f"Batch job not found: {job_id}. "
+                    "The job may have been deleted (retention: 60 days) "
+                    "or the job ID is incorrect."
+                )
+            elif "permission" in error_str or "403" in error_str:
+                raise ToolError(
+                    f"Permission denied to access Batch job: {job_id}. "
+                    "Check your GCP project permissions."
+                )
+            else:
+                ctx.error(f"Batch API error: {type(e).__name__}: {e}")
+                raise ToolError(f"Failed to fetch Batch job status: {type(e).__name__}")
+
+        # Step 6: Parse and analyze results
+        parsed_status = _parse_batch_job_status(batch_job)
+        detected_issues = _detect_batch_issues(parsed_status["status_events"])
+
+        # Generate summary
+        status = parsed_status["status"]
+        issue_summary = ""
+        if detected_issues:
+            issue_types = [issue["issue_type"] for issue in detected_issues]
+            issue_summary = f" Issues detected: {', '.join(issue_types)}"
+
+        summary = f"Batch job {status}.{issue_summary}"
+
+        # Generate Cloud Logging query command
+        job_uid = parsed_status.get("job_uid", "")
+        # Extract project from job_id path
+        project_match = re.search(r"projects/([^/]+)/", job_id)
+        project = project_match.group(1) if project_match else "<PROJECT>"
+
+        cloud_logging_query = (
+            f'gcloud logging read \'labels.job_uid="{job_uid}" '
+            f'AND logName:"batch_agent_logs"\' '
+            f"--project={project} --limit=50 --format=json"
+        )
+
+        return {
+            "workflow_id": workflow_id,
+            "task_name": matched_task_name,
+            "shard_index": actual_shard if actual_shard >= 0 else None,
+            "attempt": actual_attempt,
+            "batch_job": parsed_status,
+            "detected_issues": detected_issues,
+            "summary": summary,
+            "cloud_logging_query": cloud_logging_query,
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error fetching Batch job status: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to fetch Batch job status for task '{task_name}' in workflow {workflow_id}"
         )
 
 
