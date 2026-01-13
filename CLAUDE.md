@@ -64,7 +64,7 @@ All planned tools have been successfully implemented following test-driven devel
 3. ✅ `get_entities` - Read entity data from Terra data tables
    - Returns all entities of specified type with attributes
 
-### Workflow Monitoring & Status (6 tools)
+### Workflow Monitoring & Status (7 tools)
 4. ✅ `list_submissions` - List all submissions in a workspace
    - Returns full submission metadata including status, submitter, workflows
 5. ✅ `get_submission_status` - Check workflow submission status by ID
@@ -94,26 +94,31 @@ All planned tools have been successfully implemented following test-driven devel
 9. ✅ `get_workflow_cost` - Get cost information for workflows
    - Returns cost breakdown by compute, storage, network
    - Note: Cost data may be delayed (takes hours for GCP to process)
+10. ✅ `get_batch_job_status` - Get Google Batch job status for infrastructure debugging
+   - Extracts Batch job ID from Cromwell metadata
+   - Queries Google Batch API for job status and events
+   - Auto-detects: docker pull failures, preemption, OOM, quota issues
+   - Returns timing info (run_duration, pre_run_duration) and Cloud Logging query
 
 ### Workflow Configuration & Management (5 tools)
-10. ✅ `get_method_config` - Get method configuration details
+11. ✅ `get_method_config` - Get method configuration details
     - Returns WDL workflow definition and configuration
     - Useful for verifying workflow versions match Git commits
-11. ✅ `update_method_config` - Update/modify method configuration
+12. ✅ `update_method_config` - Update/modify method configuration
     - Change workflow versions, inputs, outputs
     - Essential for switching between Git branches during development
-12. ✅ `copy_method_config` - Duplicate method configuration to new name
+13. ✅ `copy_method_config` - Duplicate method configuration to new name
     - Copy workflow configurations within workspace
     - Useful for creating test variants of workflows
-13. ✅ `submit_workflow` - Launch a WDL workflow
+14. ✅ `submit_workflow` - Launch a WDL workflow
     - Submit workflows with specified method configuration
     - Supports both single entity and batch processing via expressions
     - Configurable call caching
-14. ✅ `abort_submission` - Cancel a running workflow
+15. ✅ `abort_submission` - Cancel a running workflow
     - Cancels all workflows in a submission
 
 ### Data Management (1 tool)
-15. ✅ `upload_entities` - Upload or update entity data in Terra data tables
+16. ✅ `upload_entities` - Upload or update entity data in Terra data tables
     - Validates entity format (name, entityType, attributes)
     - Supports batch uploads of multiple entities
     - Comprehensive error handling for invalid data
@@ -163,11 +168,14 @@ All planned tools have been successfully implemented following test-driven devel
 **Data Management:**
 - `fapi.upload_entities(namespace, workspace, entity_data)` - Upload/update entities
 
+**Google Batch API:**
+- `batch_v1.BatchServiceClient.get_job(name)` - Get Batch job status and events for infrastructure debugging
+
 ## Development Notes & Learnings
 
 ### Test-Driven Development (TDD)
 - All tools were implemented following TDD principles: write tests first, then implement
-- 75 total tests with comprehensive coverage
+- 90+ total tests with comprehensive coverage
 - Comprehensive test coverage includes:
   - Success scenarios for all tools
   - Error handling (404, 403, 400, 409 responses)

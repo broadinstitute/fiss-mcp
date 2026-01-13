@@ -2507,3 +2507,676 @@ class TestReadOnlyMode:
 
         finally:
             server_module.ALLOW_WRITES = original_allow_writes
+
+
+# ===== Tests for get_batch_job_status Tool =====
+
+
+class TestBatchHelperFunctions:
+    """Test helper functions for Batch API integration"""
+
+    def test_extract_batch_job_id_success(self):
+        """Test extraction of job ID from execution metadata"""
+        from terra_mcp.server import _extract_batch_job_id
+
+        execution = {
+            "jobId": "projects/my-project/locations/us-central1/jobs/job-abc123",
+            "executionStatus": "Failed",
+        }
+
+        result = _extract_batch_job_id(execution)
+        assert result == "projects/my-project/locations/us-central1/jobs/job-abc123"
+
+    def test_extract_batch_job_id_not_found(self):
+        """Test handling when job ID is not present"""
+        from terra_mcp.server import _extract_batch_job_id
+
+        execution = {
+            "executionStatus": "Failed",
+            "backendStatus": "Unknown",
+        }
+
+        result = _extract_batch_job_id(execution)
+        assert result is None
+
+    def test_detect_batch_issues_docker_pull_failure(self):
+        """Test detection of Docker pull failures"""
+        from terra_mcp.server import _detect_batch_issues
+
+        status_events = [
+            {
+                "time": "2024-01-01T10:00:00Z",
+                "type": "TASK_FAILED",
+                "description": "Failed to pull image 'gcr.io/my-project/my-image:v1': image not found",
+            }
+        ]
+
+        issues = _detect_batch_issues(status_events)
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "docker_pull_failure"
+        assert issues[0]["severity"] == "error"
+        assert "image name" in issues[0]["suggestion"].lower()
+
+    def test_detect_batch_issues_preemption(self):
+        """Test detection of VM preemption"""
+        from terra_mcp.server import _detect_batch_issues
+
+        status_events = [
+            {
+                "time": "2024-01-01T10:00:00Z",
+                "type": "STATUS_CHANGED",
+                "description": "VM was PREEMPTED before task completed",
+            }
+        ]
+
+        issues = _detect_batch_issues(status_events)
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "preemption"
+        assert issues[0]["severity"] == "warning"
+
+    def test_detect_batch_issues_oom_killed(self):
+        """Test detection of OOM kills"""
+        from terra_mcp.server import _detect_batch_issues
+
+        status_events = [
+            {
+                "time": "2024-01-01T10:00:00Z",
+                "type": "TASK_FAILED",
+                "description": "Task exited with exit code 137",
+            }
+        ]
+
+        issues = _detect_batch_issues(status_events)
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "oom_killed"
+        assert "memory" in issues[0]["suggestion"].lower()
+
+    def test_detect_batch_issues_rate_limit(self):
+        """Test detection of registry rate limits"""
+        from terra_mcp.server import _detect_batch_issues
+
+        status_events = [
+            {
+                "time": "2024-01-01T10:00:00Z",
+                "type": "TASK_FAILED",
+                "description": "Error 429: Too Many Requests when pulling image",
+            }
+        ]
+
+        issues = _detect_batch_issues(status_events)
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "docker_pull_rate_limit"
+
+    def test_detect_batch_issues_multiple(self):
+        """Test detection of multiple issues (should only report one per type)"""
+        from terra_mcp.server import _detect_batch_issues
+
+        status_events = [
+            {
+                "time": "2024-01-01T10:00:00Z",
+                "type": "STATUS_CHANGED",
+                "description": "VM was PREEMPTED",
+            },
+            {
+                "time": "2024-01-01T10:01:00Z",
+                "type": "STATUS_CHANGED",
+                "description": "VM was PREEMPTED again",
+            },
+        ]
+
+        issues = _detect_batch_issues(status_events)
+        # Should only have one preemption issue, not two
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "preemption"
+
+    def test_detect_batch_issues_none(self):
+        """Test when no issues are detected (successful job)"""
+        from terra_mcp.server import _detect_batch_issues
+
+        status_events = [
+            {
+                "time": "2024-01-01T10:00:00Z",
+                "type": "STATUS_CHANGED",
+                "description": "Job state changed to RUNNING",
+            },
+            {
+                "time": "2024-01-01T10:05:00Z",
+                "type": "STATUS_CHANGED",
+                "description": "Job state changed to SUCCEEDED",
+            },
+        ]
+
+        issues = _detect_batch_issues(status_events)
+        assert len(issues) == 0
+
+
+class TestGetBatchJobStatus:
+    """Test get_batch_job_status tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_success(self):
+        """Test successful Batch job status retrieval"""
+        from unittest.mock import Mock
+
+        from google.cloud import batch_v1
+
+        # Mock FISS API response with Cromwell metadata
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "status": "Failed",
+            "calls": {
+                "TestWorkflow.failing_task": [
+                    {
+                        "shardIndex": -1,
+                        "attempt": 1,
+                        "executionStatus": "Failed",
+                        "jobId": "projects/test-project/locations/us-central1/jobs/job-abc123",
+                    }
+                ]
+            },
+        }
+
+        # Mock Batch API response
+        mock_batch_job = Mock(spec=batch_v1.Job)
+        mock_batch_job.name = "projects/test-project/locations/us-central1/jobs/job-abc123"
+        mock_batch_job.uid = "uid-xyz789"
+        mock_batch_job.create_time = None
+        mock_batch_job.update_time = None
+
+        mock_status = Mock()
+        mock_status.state = batch_v1.JobStatus.State.FAILED
+        mock_status.run_duration = None
+        mock_status.status_events = []
+        mock_status.task_groups = {}
+        mock_batch_job.status = mock_status
+
+        # Mock allocation policy with machine type and boot disk
+        mock_boot_disk = Mock()
+        mock_boot_disk.size_gb = 50
+        mock_instance_policy = Mock()
+        mock_instance_policy.machine_type = "n1-standard-4"
+        mock_instance_policy.boot_disk = mock_boot_disk
+        mock_instance = Mock()
+        mock_instance.policy = mock_instance_policy
+        mock_instance.instance_template = None
+        mock_allocation_policy = Mock()
+        mock_allocation_policy.instances = [mock_instance]
+        mock_batch_job.allocation_policy = mock_allocation_policy
+
+        # Mock task groups with compute resources
+        mock_compute_resource = Mock()
+        mock_compute_resource.cpu_milli = 4000
+        mock_compute_resource.memory_mib = 15360
+        mock_task_spec = Mock()
+        mock_task_spec.compute_resource = mock_compute_resource
+        mock_task_spec.volumes = []
+        mock_task_group = Mock()
+        mock_task_group.task_spec = mock_task_spec
+        mock_batch_job.task_groups = [mock_task_group]
+
+        mock_batch_client = Mock()
+        mock_batch_client.get_job.return_value = mock_batch_job
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                result = await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="failing_task",
+                    ctx=ctx,
+                )
+
+                assert result["workflow_id"] == "wf-123"
+                assert result["task_name"] == "TestWorkflow.failing_task"
+                assert result["batch_job"]["status"] == "FAILED"
+                assert result["batch_job"]["job_uid"] == "uid-xyz789"
+                assert "cloud_logging_query" in result
+                assert "gcloud logging read" in result["cloud_logging_query"]
+                # Verify resources are returned
+                resources = result["batch_job"]["resources"]
+                assert resources["machine_type"] == "n1-standard-4"
+                assert resources["cpu"] == 4
+                assert resources["memory_mib"] == 15360
+                assert resources["boot_disk_mib"] == 51200  # 50 GB * 1024
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_with_shard(self):
+        """Test Batch status for specific shard in scattered task"""
+        from unittest.mock import Mock
+
+        from google.cloud import batch_v1
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "status": "Failed",
+            "calls": {
+                "TestWorkflow.scattered_task": [
+                    {"shardIndex": 0, "attempt": 1, "jobId": "jobs/shard0"},
+                    {"shardIndex": 1, "attempt": 1, "jobId": "jobs/shard1"},
+                    {"shardIndex": 2, "attempt": 1, "jobId": "jobs/shard2"},
+                ]
+            },
+        }
+
+        mock_batch_job = Mock(spec=batch_v1.Job)
+        mock_batch_job.name = "jobs/shard1"
+        mock_batch_job.uid = "uid-shard1"
+        mock_batch_job.create_time = None
+        mock_batch_job.update_time = None
+        mock_batch_job.allocation_policy = None
+        mock_batch_job.task_groups = None
+        mock_status = Mock()
+        mock_status.state = batch_v1.JobStatus.State.SUCCEEDED
+        mock_status.run_duration = None
+        mock_status.status_events = []
+        mock_status.task_groups = {}
+        mock_batch_job.status = mock_status
+
+        mock_batch_client = Mock()
+        mock_batch_client.get_job.return_value = mock_batch_job
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                result = await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="scattered_task",
+                    shard_index=1,
+                    ctx=ctx,
+                )
+
+                assert result["shard_index"] == 1
+                assert result["batch_job"]["job_uid"] == "uid-shard1"
+                # Verify resources are present (with None values when not mocked)
+                assert "resources" in result["batch_job"]
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_specific_attempt(self):
+        """Test Batch status for specific attempt number"""
+        from unittest.mock import Mock
+
+        from google.cloud import batch_v1
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "status": "Succeeded",
+            "calls": {
+                "TestWorkflow.retried_task": [
+                    {"shardIndex": -1, "attempt": 1, "jobId": "jobs/attempt1"},
+                    {"shardIndex": -1, "attempt": 2, "jobId": "jobs/attempt2"},
+                    {"shardIndex": -1, "attempt": 3, "jobId": "jobs/attempt3"},
+                ]
+            },
+        }
+
+        mock_batch_job = Mock(spec=batch_v1.Job)
+        mock_batch_job.name = "jobs/attempt2"
+        mock_batch_job.uid = "uid-attempt2"
+        mock_batch_job.create_time = None
+        mock_batch_job.update_time = None
+        mock_batch_job.allocation_policy = None
+        mock_batch_job.task_groups = None
+        mock_status = Mock()
+        mock_status.state = batch_v1.JobStatus.State.FAILED
+        mock_status.run_duration = None
+        mock_status.status_events = []
+        mock_status.task_groups = {}
+        mock_batch_job.status = mock_status
+
+        mock_batch_client = Mock()
+        mock_batch_client.get_job.return_value = mock_batch_job
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                result = await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="retried_task",
+                    attempt=2,
+                    ctx=ctx,
+                )
+
+                assert result["attempt"] == 2
+                assert result["batch_job"]["job_uid"] == "uid-attempt2"
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_detects_issues(self):
+        """Test that issues are detected from status events"""
+        from unittest.mock import Mock
+
+        from google.cloud import batch_v1
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "status": "Failed",
+            "calls": {
+                "TestWorkflow.failing_task": [
+                    {"shardIndex": -1, "attempt": 1, "jobId": "jobs/test"}
+                ]
+            },
+        }
+
+        # Create a mock event with description
+        mock_event = Mock()
+        mock_event.event_time = None
+        mock_event.type_ = "TASK_FAILED"
+        mock_event.description = "Failed to pull image 'gcr.io/test/image': manifest unknown"
+
+        mock_batch_job = Mock(spec=batch_v1.Job)
+        mock_batch_job.name = "jobs/test"
+        mock_batch_job.uid = "uid-test"
+        mock_batch_job.create_time = None
+        mock_batch_job.update_time = None
+        mock_batch_job.allocation_policy = None
+        mock_batch_job.task_groups = None
+        mock_status = Mock()
+        mock_status.state = batch_v1.JobStatus.State.FAILED
+        mock_status.run_duration = None
+        mock_status.status_events = [mock_event]
+        mock_status.task_groups = {}
+        mock_batch_job.status = mock_status
+
+        mock_batch_client = Mock()
+        mock_batch_client.get_job.return_value = mock_batch_job
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                result = await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="failing_task",
+                    ctx=ctx,
+                )
+
+                assert len(result["detected_issues"]) == 1
+                assert result["detected_issues"][0]["issue_type"] == "docker_pull_failure"
+                assert "docker_pull_failure" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_workflow_not_found(self):
+        """Test handling of non-existent workflow"""
+        from fastmcp.exceptions import ToolError
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-nonexistent",
+                    task_name="some_task",
+                    ctx=ctx,
+                )
+
+            assert "not found" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_task_not_found(self):
+        """Test handling when task name doesn't exist"""
+        from fastmcp.exceptions import ToolError
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "calls": {"TestWorkflow.real_task": [{"shardIndex": -1, "attempt": 1}]},
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="nonexistent_task",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg.lower()
+            assert "real_task" in error_msg  # Should list available tasks
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_no_job_id(self):
+        """Test handling when Batch job ID cannot be extracted from metadata"""
+        from fastmcp.exceptions import ToolError
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "calls": {
+                "TestWorkflow.task_without_jobid": [
+                    {
+                        "shardIndex": -1,
+                        "attempt": 1,
+                        "executionStatus": "Failed",
+                        # No jobId field
+                    }
+                ]
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="task_without_jobid",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "no batch job id" in error_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_batch_api_permission_denied(self):
+        """Test handling of Batch API permission errors"""
+        from fastmcp.exceptions import ToolError
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "calls": {
+                "TestWorkflow.task": [{"shardIndex": -1, "attempt": 1, "jobId": "jobs/test"}]
+            },
+        }
+
+        mock_batch_client = MagicMock()
+        mock_batch_client.get_job.side_effect = Exception("403 Permission denied")
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                with pytest.raises(ToolError) as exc_info:
+                    await tool_fn(
+                        workspace_namespace="test-ns",
+                        workspace_name="test-ws",
+                        submission_id="sub-123",
+                        workflow_id="wf-123",
+                        task_name="task",
+                        ctx=ctx,
+                    )
+
+                assert "permission denied" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_batch_job_not_found(self):
+        """Test handling when Batch job has been deleted"""
+        from fastmcp.exceptions import ToolError
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "calls": {
+                "TestWorkflow.task": [{"shardIndex": -1, "attempt": 1, "jobId": "jobs/deleted-job"}]
+            },
+        }
+
+        mock_batch_client = MagicMock()
+        mock_batch_client.get_job.side_effect = Exception("404 Not found")
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                with pytest.raises(ToolError) as exc_info:
+                    await tool_fn(
+                        workspace_namespace="test-ns",
+                        workspace_name="test-ws",
+                        submission_id="sub-123",
+                        workflow_id="wf-123",
+                        task_name="task",
+                        ctx=ctx,
+                    )
+
+                error_msg = str(exc_info.value).lower()
+                assert "not found" in error_msg
+                assert "60 days" in error_msg  # Mention retention period
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_short_task_name(self):
+        """Test that short task names are resolved correctly"""
+        from unittest.mock import Mock
+
+        from google.cloud import batch_v1
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "MyLongWorkflowName",
+            "calls": {
+                "MyLongWorkflowName.short_task": [
+                    {"shardIndex": -1, "attempt": 1, "jobId": "jobs/test"}
+                ]
+            },
+        }
+
+        mock_batch_job = Mock(spec=batch_v1.Job)
+        mock_batch_job.name = "jobs/test"
+        mock_batch_job.uid = "uid-test"
+        mock_batch_job.create_time = None
+        mock_batch_job.update_time = None
+        mock_batch_job.allocation_policy = None
+        mock_batch_job.task_groups = None
+        mock_status = Mock()
+        mock_status.state = batch_v1.JobStatus.State.SUCCEEDED
+        mock_status.run_duration = None
+        mock_status.status_events = []
+        mock_status.task_groups = {}
+        mock_batch_job.status = mock_status
+
+        mock_batch_client = Mock()
+        mock_batch_client.get_job.return_value = mock_batch_job
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
+                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                ctx = MagicMock()
+
+                # Use short name instead of fully qualified
+                result = await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="short_task",  # Short name
+                    ctx=ctx,
+                )
+
+                # Should resolve to fully qualified name
+                assert result["task_name"] == "MyLongWorkflowName.short_task"
+
+    @pytest.mark.asyncio
+    async def test_get_batch_job_status_shard_not_found(self):
+        """Test handling when specified shard doesn't exist"""
+        from fastmcp.exceptions import ToolError
+
+        mock_fiss_response = MagicMock()
+        mock_fiss_response.status_code = 200
+        mock_fiss_response.json.return_value = {
+            "id": "wf-123",
+            "workflowName": "TestWorkflow",
+            "calls": {
+                "TestWorkflow.task": [
+                    {"shardIndex": 0, "attempt": 1, "jobId": "jobs/s0"},
+                    {"shardIndex": 1, "attempt": 1, "jobId": "jobs/s1"},
+                ]
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
+            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await tool_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    submission_id="sub-123",
+                    workflow_id="wf-123",
+                    task_name="task",
+                    shard_index=99,  # Non-existent shard
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "shard" in error_msg.lower()
+            assert "0" in error_msg and "1" in error_msg  # Should list available shards
