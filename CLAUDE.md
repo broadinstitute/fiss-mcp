@@ -195,6 +195,12 @@ All planned tools have been successfully implemented following test-driven devel
 - Use `pytest.mark.asyncio` for all async tool tests
 - Mock context object (`ctx = MagicMock()`) for logging verification
 
+### Git Workflow Best Practices
+- **Never amend pushed commits**: Once a commit has been pushed to a remote branch, do not use `git commit --amend`. This rewrites history and requires force pushing, which can cause issues for collaborators.
+- **Create new commits for fixes**: If you need to fix something after pushing, create a new commit with the fix rather than amending the previous one.
+- **Use feature branches**: Create a feature branch for each new feature or bug fix. This keeps the main branch clean and makes PRs easier to review.
+- **Commit message format**: Use clear, descriptive commit messages. Include a summary line, optional body, and `Co-Authored-By` trailer when appropriate.
+
 ### FISS Installation Quirks
 - Firecloud requires `setuptools<80` due to deprecated `package_index` (see [fiss#192](https://github.com/broadinstitute/fiss/issues/192))
 - Must use `pip install --no-build-isolation` to use local setuptools

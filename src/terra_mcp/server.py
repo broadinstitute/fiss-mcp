@@ -1669,6 +1669,9 @@ async def get_batch_job_status(
     VM provisioning, preemption), error details are NOT in standard GCS stderr logs.
     This tool retrieves those details from the Google Batch API.
 
+    **CONTEXT SIZE:** Response is typically 2-3K tokens. Safe to call without
+    context exhaustion concerns.
+
     **RECOMMENDED DEBUGGING WORKFLOW:**
     1. get_submission_status -> identify failed workflows
     2. get_job_metadata (summary mode) -> identify failed tasks
@@ -1701,10 +1704,19 @@ async def get_batch_job_status(
         Dictionary containing:
         - workflow_id: The workflow UUID
         - task_name: Matched task name (fully qualified)
-        - batch_job: Job status, events, and timing info
-        - detected_issues: Auto-detected issues with suggestions
-        - summary: Human-readable summary of job status
-        - cloud_logging_query: Ready-to-use gcloud command for additional debugging
+        - shard_index: The shard index (-1 if not scattered)
+        - attempt: The attempt number
+        - batch_job: Job details including:
+            - job_name: Full GCP resource path
+            - job_uid: UID for Cloud Logging queries
+            - status: QUEUED, SCHEDULED, RUNNING, SUCCEEDED, or FAILED
+            - timing: {run_duration, pre_run_duration} - run time vs queue/setup time
+            - resources: {machine_type, cpu, memory_mib, boot_disk_mib, data_disks_mib}
+            - status_events: List of state transitions with timestamps
+            - task_counts: Count of tasks by status
+        - detected_issues: Auto-detected issues with severity and suggestions
+        - summary: Human-readable one-line summary
+        - cloud_logging_query: Ready-to-use gcloud command for deeper debugging
     """
     try:
         ctx.info(f"Fetching Batch job status for task '{task_name}' in workflow {workflow_id}")
