@@ -33,7 +33,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 ## Available Tools
 
-This MCP server provides 15 tools for interacting with Terra.Bio workspaces:
+This MCP server provides 16 tools for interacting with Terra.Bio workspaces:
 
 ### Read-Only Tools (Always Available)
 
@@ -53,6 +53,7 @@ These tools are available in both read-only mode (default) and when write access
 - **`get_workflow_logs`** - Get workflow logs with optional GCS content fetching and smart truncation
 - **`get_workflow_outputs`** - Get output files and values from completed workflows
 - **`get_workflow_cost`** - Get cost information for workflow executions
+- **`get_batch_job_status`** - Debug infrastructure failures (docker pull errors, preemption, OOM) via Google Batch API
 
 #### Workflow Configuration (Read-Only)
 
@@ -129,6 +130,84 @@ OutOfMemoryError: Java heap space
   at htsjdk.samtools.BAMRecordCodec.decode()
 ```
 This is a memory issue. The task needs more RAM allocated. You can increase the memory in your WDL using the runtime attribute: `memory: "32 GB"`
+```
+
+```
+Human: I have a large submission running as the most recent submission in workspace my_lab/my_workspace.
+Can you summarize where each workflow is in the pipeline?
+
+Claude: I'll check the submission status and analyze the running workflows.
+[Claude calls list_submissions with namespace="my_lab", name="my_workspace", limit=1]
+[Claude calls get_submission_status with submission_id="abc-123-def"]
+[Claude calls get_job_metadata for running workflows to identify current task]
+
+Submission abc-123-def has 500 workflows with this breakdown:
+- Succeeded: 312 workflows (complete)
+- Running: 156 workflows
+  - 45 in "align_reads" (earliest stage)
+  - 78 in "call_variants" (middle stage)
+  - 33 in "annotate_vcf" (final stage)
+- Failed: 12 workflows (see next for details)
+- Queued: 20 workflows (waiting to start)
+
+The running workflows are progressing normally through the pipeline.
+```
+
+```
+Human: My submission had 32 workflow failures. Can you categorize what went wrong?
+
+Claude: I'll analyze the failed workflows to identify failure patterns.
+[Claude calls get_submission_status to identify failed workflow IDs]
+[Claude calls get_job_metadata (summary mode) for each failed workflow]
+[Claude calls get_batch_job_status for infrastructure failures]
+
+Failure Analysis for 32 failed workflows:
+
+| Category | Count | Root Cause |
+|----------|-------|------------|
+| OOM errors | 19 | call_variants task exceeded 16GB memory limit |
+| Disk exhaustion | 10 | Temporary files filled disk in align_reads |
+| Docker pull failures | 2 | Rate-limited pulling image from Docker Hub |
+| Input data errors | 1 | Malformed BAM file (sample_47) |
+
+Recommendations:
+1. Increase memory to 32GB for call_variants task
+2. Increase disk size to 200GB for align_reads
+3. Consider using a private container registry to avoid Docker Hub rate limits
+4. Check sample_47 BAM file integrity before resubmitting
+```
+
+```
+Human: I ran our new optimized code as submission abc-123-new and the baseline as xyz-789-old
+on the same 200 samples. Can you verify the outputs match and check if runtime improved?
+
+Claude: I'll compare both submissions for correctness and performance.
+[Claude calls get_submission_status for both submissions]
+[Claude calls get_job_metadata for sample of workflows from each]
+[Claude calls get_workflow_outputs to compare output files]
+[Claude calls get_workflow_cost for both]
+
+**Regression Test Results: New Code vs Baseline**
+
+Correctness (200 samples):
+- Output files match: 198/200 samples (99%)
+- Minor differences: 2 samples have VCF annotation order differences (functionally equivalent)
+- No data quality regressions detected
+
+Performance (call_variants step):
+- Baseline avg runtime: 47 minutes
+- New code avg runtime: 31 minutes
+- Improvement: 34% faster
+
+Cost:
+- Baseline total: $156.40
+- New code total: $118.20
+- Savings: 24% reduction
+
+Conclusion: The optimization is successful. Outputs are equivalent and the
+call_variants step shows the expected ~35% runtime improvement. Safe to merge.
+
+Human: this is great, please post your findings as a comment on the open PR on this git branch.
 ```
 
 ## Data Privacy and Security Considerations
@@ -403,9 +482,9 @@ PYTHONPATH=src pytest tests/ -v
 PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 ```
 
-The test suite includes 70 comprehensive tests:
+The test suite includes 93 comprehensive tests:
 - Server initialization verification
-- Tool registration checks (all 15 tools)
+- Tool registration checks (all 16 tools)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
 - Error handling scenarios (404s, 403s, 400s, 409s, API failures, GCS errors)

@@ -1055,6 +1055,12 @@ async def get_job_metadata(
         Dictionary with mode-specific structure:
         - summary: Structured summary with workflow status, task counts, failures
         - extract: Extracted data with size info
+
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         # Validate parameters
@@ -1260,6 +1266,12 @@ async def get_workflow_logs(
         - status: Workflow execution status
         - logs: Dictionary mapping task names to their log info (URLs and optionally content)
         - fetch_content: Whether content was fetched (for clarity)
+
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching log locations for workflow {workflow_id}")
@@ -1524,6 +1536,12 @@ async def get_workflow_outputs(
         - outputs: Dictionary mapping output variable names to their values/paths
         - id: Workflow identifier
         - tasks: Task-level outputs (if available)
+
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching outputs for workflow {workflow_id} in submission {submission_id}")
@@ -1600,6 +1618,12 @@ async def get_workflow_cost(
         - currency: Currency code (usually "USD")
         - costBreakdown: Detailed breakdown by task or resource type (if available)
         - status: Whether cost calculation is complete or pending
+
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching cost for workflow {workflow_id} in submission {submission_id}")
@@ -1717,6 +1741,12 @@ async def get_batch_job_status(
         - detected_issues: Auto-detected issues with severity and suggestions
         - summary: Human-readable one-line summary
         - cloud_logging_query: Ready-to-use gcloud command for deeper debugging
+
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching Batch job status for task '{task_name}' in workflow {workflow_id}")
