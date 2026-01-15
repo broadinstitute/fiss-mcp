@@ -166,13 +166,13 @@ Failure Analysis for 32 failed workflows:
 | Category | Count | Root Cause |
 |----------|-------|------------|
 | OOM errors | 19 | call_variants task exceeded 16GB memory limit |
-| Disk exhaustion | 10 | Temporary files filled boot disk in align_reads |
+| Disk exhaustion | 10 | Temporary files filled disk in align_reads |
 | Docker pull failures | 2 | Rate-limited pulling image from Docker Hub |
 | Input data errors | 1 | Malformed BAM file (sample_47) |
 
 Recommendations:
 1. Increase memory to 32GB for call_variants task
-2. Increase boot disk size to 100GB for align_reads
+2. Increase disk size to 200GB for align_reads
 3. Consider using a private container registry to avoid Docker Hub rate limits
 4. Check sample_47 BAM file integrity before resubmitting
 ```
@@ -206,6 +206,8 @@ Cost:
 
 Conclusion: The optimization is successful. Outputs are equivalent and the
 call_variants step shows the expected ~35% runtime improvement. Safe to merge.
+
+Human: this is great, please post your findings as a comment on the open PR on this git branch.
 ```
 
 ## Data Privacy and Security Considerations
