@@ -133,20 +133,22 @@ This is a memory issue. The task needs more RAM allocated. You can increase the 
 ```
 
 ```
-Human: I have a large submission running. Can you summarize where each workflow is in the pipeline?
+Human: I have a large submission running as the most recent submission in workspace my_lab/my_workspace.
+Can you summarize where each workflow is in the pipeline?
 
 Claude: I'll check the submission status and analyze the running workflows.
+[Claude calls list_submissions with namespace="my_lab", name="my_workspace", limit=1]
 [Claude calls get_submission_status with submission_id="abc-123-def"]
-[Claude calls get_job_metadata for each running workflow to identify current task]
+[Claude calls get_job_metadata for running workflows to identify current task]
 
-Submission abc-123-def has 50 workflows with this breakdown:
-- Succeeded: 28 workflows (complete)
-- Running: 17 workflows
-  - 5 in "align_reads" (earliest stage)
-  - 8 in "call_variants" (middle stage)
-  - 4 in "annotate_vcf" (final stage)
-- Failed: 3 workflows (see next for details)
-- Queued: 2 workflows (waiting to start)
+Submission abc-123-def has 500 workflows with this breakdown:
+- Succeeded: 312 workflows (complete)
+- Running: 156 workflows
+  - 45 in "align_reads" (earliest stage)
+  - 78 in "call_variants" (middle stage)
+  - 33 in "annotate_vcf" (final stage)
+- Failed: 12 workflows (see next for details)
+- Queued: 20 workflows (waiting to start)
 
 The running workflows are progressing normally through the pipeline.
 ```
