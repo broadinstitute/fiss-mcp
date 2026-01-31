@@ -288,6 +288,58 @@ All planned tools have been successfully implemented following test-driven devel
 - Codecov integration for coverage tracking
 - Formatting check prevents commits with style violations
 
+## Skills Implementation
+
+### Overview
+MCP Skills are procedural knowledge files that teach Claude how to perform multi-step workflows. Skills are served via FastMCP's `SkillsDirectoryProvider` and discovered from `SKILL.md` files.
+
+### Why Skills?
+- **Centralized procedural knowledge**: Multi-step workflows were duplicated across tool docstrings
+- **Lazy loading**: Skills are loaded only when relevant to the task
+- **Discoverability**: Skills have descriptions that help Claude find them automatically
+- **Context efficiency**: Tool docstrings stay focused on individual tool usage
+
+### Skills Location
+Skills are stored in `src/terra_mcp/skills/` with this structure:
+```
+skills/
+├── debug-workflow-failure/
+│   └── SKILL.md
+├── extract-workflow-data/
+│   └── SKILL.md
+├── submit-workflow-safely/
+│   └── SKILL.md
+├── navigate-subworkflows/
+│   └── SKILL.md
+└── manage-context-size/
+    └── SKILL.md
+```
+
+### SKILL.md Format
+Each SKILL.md file has YAML frontmatter with a `description` field that helps Claude discover when to use it:
+```markdown
+---
+description: Debug failed Terra/Cromwell workflow submissions. Use when analyzing failed submissions...
+---
+
+# Skill Title
+
+Step-by-step instructions...
+```
+
+### Design Decisions
+1. **Short warnings stay in docstrings**: One-line cautions remain in tool docstrings so agents see them before calling tools
+2. **Detailed procedures move to skills**: Multi-step workflows and anti-patterns live in skills
+3. **Skill references in docstrings**: Tools reference relevant skills (e.g., "See the debug-workflow-failure skill")
+4. **FastMCP 3.x required**: Skills require FastMCP >=3.0.0b1 (currently in beta)
+
+### Adding New Skills
+1. Create a new directory under `src/terra_mcp/skills/` with a descriptive kebab-case name
+2. Create `SKILL.md` with YAML frontmatter containing a `description` field
+3. Write clear, step-by-step instructions with code examples
+4. Add test for the new skill in `tests/test_server.py`
+5. Optionally add references to the skill in relevant tool docstrings
+
 ## Future Enhancements
 
 Potential areas for expansion beyond the current 15 tools:

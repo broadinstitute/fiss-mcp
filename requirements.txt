@@ -1,24 +1,12 @@
 # Terra.Bio MCP Server Dependencies
+# =================================
+# This file is kept for backward compatibility and quick setup.
+# The authoritative source of dependencies is pyproject.toml.
 
 # Build dependencies (must be installed first)
 # Required for firecloud installation - see broadinstitute/fiss#192
 setuptools<80
 
-# MCP Framework
-fastmcp>=0.2.0
-
-# Terra/FISS API Client
-firecloud>=0.16.0
-
-# Google Cloud Storage (for fetching workflow logs)
-google-cloud-storage>=2.0.0
-
-# Google Cloud Batch (for get_batch_job_status tool)
-google-cloud-batch>=0.17.0
-
-# Data validation (may be included in fastmcp)
-pydantic>=2.0.0
-
-# Testing dependencies
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
+# Install package with dev dependencies from pyproject.toml
+# Use --no-build-isolation for firecloud compatibility
+-e .[dev]

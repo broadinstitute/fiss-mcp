@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# FastMCP 3.x: decorated functions are directly callable, import them for testing
+from terra_mcp import server as terra_server
 from terra_mcp.server import mcp
 
 
@@ -30,12 +32,12 @@ class TestServerInitialization:
         assert mcp is not None
         assert mcp.name == "Terra.Bio MCP Server"
 
-    def test_server_has_tools(self):
+    @pytest.mark.asyncio
+    async def test_server_has_tools(self):
         """Verify all Phase 1, Phase 2, Phase 3, and Phase 4 tools are registered"""
-        # Get registered tools via MCP's internal registry
-        # Note: FastMCP uses decorators to register tools
-        tools = mcp._tool_manager._tools
-        tool_names = {name for name in tools.keys()}
+        # FastMCP 3.x: use list_tools() to get registered tools
+        tools = await mcp.list_tools()
+        tool_names = {t.name for t in tools}
 
         # Verify all Phase 1 tools are present
         assert "list_workspaces" in tool_names
@@ -91,7 +93,7 @@ class TestListWorkspaces:
 
         with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"].fn
+            list_workspaces_fn = terra_server.list_workspaces
 
             # Create mock context
             ctx = MagicMock()
@@ -116,7 +118,7 @@ class TestListWorkspaces:
 
         with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"].fn
+            list_workspaces_fn = terra_server.list_workspaces
 
             ctx = MagicMock()
 
@@ -143,7 +145,7 @@ class TestGetWorkspaceDataTables:
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"].fn
+            get_workspace_data_tables_fn = terra_server.get_workspace_data_tables
 
             ctx = MagicMock()
             result = await get_workspace_data_tables_fn(
@@ -169,7 +171,7 @@ class TestGetWorkspaceDataTables:
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"].fn
+            get_workspace_data_tables_fn = terra_server.get_workspace_data_tables
 
             ctx = MagicMock()
 
@@ -194,7 +196,7 @@ class TestGetWorkspaceDataTables:
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_workspace_data_tables_fn = mcp._tool_manager._tools["get_workspace_data_tables"].fn
+            get_workspace_data_tables_fn = terra_server.get_workspace_data_tables
 
             ctx = MagicMock()
 
@@ -247,7 +249,7 @@ class TestGetSubmissionStatus:
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+            get_submission_status_fn = terra_server.get_submission_status
 
             ctx = MagicMock()
             result = await get_submission_status_fn(
@@ -284,7 +286,7 @@ class TestGetSubmissionStatus:
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+            get_submission_status_fn = terra_server.get_submission_status
 
             ctx = MagicMock()
             result = await get_submission_status_fn(
@@ -310,7 +312,7 @@ class TestGetSubmissionStatus:
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+            get_submission_status_fn = terra_server.get_submission_status
 
             ctx = MagicMock()
 
@@ -340,7 +342,7 @@ class TestGetSubmissionStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+            get_submission_status_fn = terra_server.get_submission_status
 
             ctx = MagicMock()
 
@@ -398,7 +400,7 @@ class TestGetSubmissionStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
-            get_submission_status_fn = mcp._tool_manager._tools["get_submission_status"].fn
+            get_submission_status_fn = terra_server.get_submission_status
 
             ctx = MagicMock()
             result = await get_submission_status_fn(
@@ -442,7 +444,7 @@ class TestGetJobMetadata:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             result = await get_job_metadata_fn(
@@ -494,7 +496,7 @@ class TestGetJobMetadata:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             result = await get_job_metadata_fn(
@@ -543,7 +545,7 @@ class TestGetJobMetadata:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             result = await get_job_metadata_fn(
@@ -581,7 +583,7 @@ class TestGetJobMetadata:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             result = await get_job_metadata_fn(
@@ -625,7 +627,7 @@ class TestGetJobMetadata:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             result = await get_job_metadata_fn(
@@ -659,7 +661,7 @@ class TestGetJobMetadata:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             with pytest.raises(ToolError, match="Output 'missing_output' not found"):
@@ -684,7 +686,7 @@ class TestGetJobMetadata:
         mock_response.json.return_value = {"id": "wf-456", "calls": {}}
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_job_metadata_fn = mcp._tool_manager._tools["get_job_metadata"].fn
+            get_job_metadata_fn = terra_server.get_job_metadata
 
             ctx = MagicMock()
             with pytest.raises(ToolError, match='mode="extract" requires either output_name'):
@@ -733,7 +735,7 @@ class TestGetWorkflowLogs:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
-            get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+            get_workflow_logs_fn = terra_server.get_workflow_logs
 
             ctx = MagicMock()
             result = await get_workflow_logs_fn(
@@ -790,7 +792,7 @@ class TestGetWorkflowLogs:
             "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response
         ):
             with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
-                get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+                get_workflow_logs_fn = terra_server.get_workflow_logs
 
                 ctx = MagicMock()
                 result = await get_workflow_logs_fn(
@@ -847,7 +849,7 @@ class TestGetWorkflowLogs:
             "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response
         ):
             with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
-                get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+                get_workflow_logs_fn = terra_server.get_workflow_logs
 
                 ctx = MagicMock()
                 result = await get_workflow_logs_fn(
@@ -897,7 +899,7 @@ class TestGetWorkflowLogs:
         with patch("terra_mcp.server.fapi.get_workflow_metadata") as mock_get_metadata:
             mock_get_metadata.return_value = mock_metadata_response
 
-            get_workflow_logs_fn = mcp._tool_manager._tools["get_workflow_logs"].fn
+            get_workflow_logs_fn = terra_server.get_workflow_logs
 
             ctx = MagicMock()
             result = await get_workflow_logs_fn(
@@ -952,7 +954,7 @@ class TestListSubmissions:
         ]
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -978,7 +980,7 @@ class TestListSubmissions:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
 
@@ -1002,7 +1004,7 @@ class TestListSubmissions:
         mock_response.status_code = 403
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
 
@@ -1023,7 +1025,7 @@ class TestListSubmissions:
         mock_response.json.return_value = []
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1057,7 +1059,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1095,7 +1097,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1154,7 +1156,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1206,7 +1208,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1258,7 +1260,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1296,7 +1298,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1338,7 +1340,7 @@ class TestListSubmissions:
         mock_response.json.return_value = mock_submissions
 
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
-            list_submissions_fn = mcp._tool_manager._tools["list_submissions"].fn
+            list_submissions_fn = terra_server.list_submissions
 
             ctx = MagicMock()
             result = await list_submissions_fn(
@@ -1373,7 +1375,7 @@ class TestGetWorkflowOutputs:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
-            get_workflow_outputs_fn = mcp._tool_manager._tools["get_workflow_outputs"].fn
+            get_workflow_outputs_fn = terra_server.get_workflow_outputs
 
             ctx = MagicMock()
             result = await get_workflow_outputs_fn(
@@ -1398,7 +1400,7 @@ class TestGetWorkflowOutputs:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
-            get_workflow_outputs_fn = mcp._tool_manager._tools["get_workflow_outputs"].fn
+            get_workflow_outputs_fn = terra_server.get_workflow_outputs
 
             ctx = MagicMock()
 
@@ -1424,7 +1426,7 @@ class TestGetWorkflowOutputs:
         mock_response.status_code = 403
 
         with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
-            get_workflow_outputs_fn = mcp._tool_manager._tools["get_workflow_outputs"].fn
+            get_workflow_outputs_fn = terra_server.get_workflow_outputs
 
             ctx = MagicMock()
 
@@ -1460,7 +1462,7 @@ class TestGetWorkflowCost:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
-            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+            get_workflow_cost_fn = terra_server.get_workflow_cost
 
             ctx = MagicMock()
             result = await get_workflow_cost_fn(
@@ -1489,7 +1491,7 @@ class TestGetWorkflowCost:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
-            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+            get_workflow_cost_fn = terra_server.get_workflow_cost
 
             ctx = MagicMock()
             result = await get_workflow_cost_fn(
@@ -1512,7 +1514,7 @@ class TestGetWorkflowCost:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
-            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+            get_workflow_cost_fn = terra_server.get_workflow_cost
 
             ctx = MagicMock()
 
@@ -1538,7 +1540,7 @@ class TestGetWorkflowCost:
         mock_response.status_code = 403
 
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
-            get_workflow_cost_fn = mcp._tool_manager._tools["get_workflow_cost"].fn
+            get_workflow_cost_fn = terra_server.get_workflow_cost
 
             ctx = MagicMock()
 
@@ -1687,7 +1689,7 @@ class TestGetEntities:
         ]
 
         with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
-            get_entities_fn = mcp._tool_manager._tools["get_entities"].fn
+            get_entities_fn = terra_server.get_entities
 
             ctx = MagicMock()
             result = await get_entities_fn(
@@ -1712,7 +1714,7 @@ class TestGetEntities:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
-            get_entities_fn = mcp._tool_manager._tools["get_entities"].fn
+            get_entities_fn = terra_server.get_entities
 
             ctx = MagicMock()
 
@@ -1735,7 +1737,7 @@ class TestGetEntities:
         mock_response.json.return_value = []
 
         with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
-            get_entities_fn = mcp._tool_manager._tools["get_entities"].fn
+            get_entities_fn = terra_server.get_entities
 
             ctx = MagicMock()
             result = await get_entities_fn(
@@ -1776,7 +1778,7 @@ class TestGetMethodConfig:
         }
 
         with patch("terra_mcp.server.fapi.get_workspace_config", return_value=mock_response):
-            get_method_config_fn = mcp._tool_manager._tools["get_method_config"].fn
+            get_method_config_fn = terra_server.get_method_config
 
             ctx = MagicMock()
             result = await get_method_config_fn(
@@ -1801,7 +1803,7 @@ class TestGetMethodConfig:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.get_workspace_config", return_value=mock_response):
-            get_method_config_fn = mcp._tool_manager._tools["get_method_config"].fn
+            get_method_config_fn = terra_server.get_method_config
 
             ctx = MagicMock()
 
@@ -1841,7 +1843,7 @@ class TestUpdateMethodConfig:
         }
 
         with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
-            update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+            update_method_config_fn = terra_server.update_method_config
 
             ctx = MagicMock()
             result = await update_method_config_fn(
@@ -1864,7 +1866,7 @@ class TestUpdateMethodConfig:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
-            update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+            update_method_config_fn = terra_server.update_method_config
 
             ctx = MagicMock()
 
@@ -1897,7 +1899,7 @@ class TestCopyMethodConfig:
         }
 
         with patch("terra_mcp.server.fapi.copy_config_from_repo", return_value=mock_response):
-            copy_method_config_fn = mcp._tool_manager._tools["copy_method_config"].fn
+            copy_method_config_fn = terra_server.copy_method_config
 
             ctx = MagicMock()
             result = await copy_method_config_fn(
@@ -1921,7 +1923,7 @@ class TestCopyMethodConfig:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.copy_config_from_repo", return_value=mock_response):
-            copy_method_config_fn = mcp._tool_manager._tools["copy_method_config"].fn
+            copy_method_config_fn = terra_server.copy_method_config
 
             ctx = MagicMock()
 
@@ -1955,7 +1957,7 @@ class TestSubmitWorkflow:
         }
 
         with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
-            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+            submit_workflow_fn = terra_server.submit_workflow
 
             ctx = MagicMock()
             result = await submit_workflow_fn(
@@ -1980,7 +1982,7 @@ class TestSubmitWorkflow:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
-            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+            submit_workflow_fn = terra_server.submit_workflow
 
             ctx = MagicMock()
 
@@ -2009,7 +2011,7 @@ class TestSubmitWorkflow:
         }
 
         with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
-            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+            submit_workflow_fn = terra_server.submit_workflow
 
             ctx = MagicMock()
             result = await submit_workflow_fn(
@@ -2036,7 +2038,7 @@ class TestAbortSubmission:
         mock_response.status_code = 204  # No content - successful abort
 
         with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
-            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+            abort_submission_fn = terra_server.abort_submission
 
             ctx = MagicMock()
             result = await abort_submission_fn(
@@ -2058,7 +2060,7 @@ class TestAbortSubmission:
         mock_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
-            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+            abort_submission_fn = terra_server.abort_submission
 
             ctx = MagicMock()
 
@@ -2083,7 +2085,7 @@ class TestAbortSubmission:
         mock_response.text = "Submission already completed"
 
         with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
-            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+            abort_submission_fn = terra_server.abort_submission
 
             ctx = MagicMock()
 
@@ -2133,7 +2135,7 @@ class TestUploadEntities:
         ]
 
         with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
-            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+            upload_entities_fn = terra_server.upload_entities
 
             ctx = MagicMock()
             result = await upload_entities_fn(
@@ -2164,7 +2166,7 @@ class TestUploadEntities:
         ]
 
         with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
-            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+            upload_entities_fn = terra_server.upload_entities
 
             ctx = MagicMock()
 
@@ -2196,7 +2198,7 @@ class TestUploadEntities:
         ]
 
         with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
-            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+            upload_entities_fn = terra_server.upload_entities
 
             ctx = MagicMock()
 
@@ -2215,7 +2217,7 @@ class TestUploadEntities:
         """Test handling of empty entity data"""
         from fastmcp.exceptions import ToolError
 
-        upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+        upload_entities_fn = terra_server.upload_entities
 
         ctx = MagicMock()
 
@@ -2243,7 +2245,7 @@ class TestUploadEntities:
             }
         ]
 
-        upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+        upload_entities_fn = terra_server.upload_entities
 
         ctx = MagicMock()
 
@@ -2276,7 +2278,7 @@ class TestReadOnlyMode:
             # Set read-only mode
             server_module.ALLOW_WRITES = False
 
-            update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+            update_method_config_fn = terra_server.update_method_config
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -2309,7 +2311,7 @@ class TestReadOnlyMode:
         try:
             server_module.ALLOW_WRITES = False
 
-            copy_method_config_fn = mcp._tool_manager._tools["copy_method_config"].fn
+            copy_method_config_fn = terra_server.copy_method_config
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -2342,7 +2344,7 @@ class TestReadOnlyMode:
         try:
             server_module.ALLOW_WRITES = False
 
-            submit_workflow_fn = mcp._tool_manager._tools["submit_workflow"].fn
+            submit_workflow_fn = terra_server.submit_workflow
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -2375,7 +2377,7 @@ class TestReadOnlyMode:
         try:
             server_module.ALLOW_WRITES = False
 
-            abort_submission_fn = mcp._tool_manager._tools["abort_submission"].fn
+            abort_submission_fn = terra_server.abort_submission
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -2405,7 +2407,7 @@ class TestReadOnlyMode:
         try:
             server_module.ALLOW_WRITES = False
 
-            upload_entities_fn = mcp._tool_manager._tools["upload_entities"].fn
+            upload_entities_fn = terra_server.upload_entities
             ctx = MagicMock()
 
             entity_data = [
@@ -2452,7 +2454,7 @@ class TestReadOnlyMode:
             }
 
             with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
-                update_method_config_fn = mcp._tool_manager._tools["update_method_config"].fn
+                update_method_config_fn = terra_server.update_method_config
                 ctx = MagicMock()
 
                 result = await update_method_config_fn(
@@ -2496,7 +2498,7 @@ class TestReadOnlyMode:
             ]
 
             with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
-                list_workspaces_fn = mcp._tool_manager._tools["list_workspaces"].fn
+                list_workspaces_fn = terra_server.list_workspaces
                 ctx = MagicMock()
 
                 result = await list_workspaces_fn(ctx)
@@ -2722,7 +2724,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 result = await tool_fn(
@@ -2788,7 +2790,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 result = await tool_fn(
@@ -2847,7 +2849,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 result = await tool_fn(
@@ -2908,7 +2910,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 result = await tool_fn(
@@ -2933,7 +2935,7 @@ class TestGetBatchJobStatus:
         mock_fiss_response.status_code = 404
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
-            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            tool_fn = terra_server.get_batch_job_status
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -2962,7 +2964,7 @@ class TestGetBatchJobStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
-            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            tool_fn = terra_server.get_batch_job_status
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -3002,7 +3004,7 @@ class TestGetBatchJobStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
-            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            tool_fn = terra_server.get_batch_job_status
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -3038,7 +3040,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 with pytest.raises(ToolError) as exc_info:
@@ -3073,7 +3075,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 with pytest.raises(ToolError) as exc_info:
@@ -3128,7 +3130,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
-                tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+                tool_fn = terra_server.get_batch_job_status
                 ctx = MagicMock()
 
                 # Use short name instead of fully qualified
@@ -3163,7 +3165,7 @@ class TestGetBatchJobStatus:
         }
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
-            tool_fn = mcp._tool_manager._tools["get_batch_job_status"].fn
+            tool_fn = terra_server.get_batch_job_status
             ctx = MagicMock()
 
             with pytest.raises(ToolError) as exc_info:
@@ -3180,3 +3182,126 @@ class TestGetBatchJobStatus:
             error_msg = str(exc_info.value)
             assert "shard" in error_msg.lower()
             assert "0" in error_msg and "1" in error_msg  # Should list available shards
+
+
+class TestSkills:
+    """Test MCP Skills directory and SKILL.md files"""
+
+    def test_skills_directory_exists(self):
+        """Verify the skills directory exists"""
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent / "src" / "terra_mcp" / "skills"
+        assert skills_dir.exists(), f"Skills directory not found at {skills_dir}"
+        assert skills_dir.is_dir(), f"{skills_dir} is not a directory"
+
+    def test_all_expected_skills_exist(self):
+        """Verify all expected skill directories are present"""
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent / "src" / "terra_mcp" / "skills"
+
+        expected_skills = [
+            "debug-workflow-failure",
+            "extract-workflow-data",
+            "submit-workflow-safely",
+            "navigate-subworkflows",
+            "manage-context-size",
+        ]
+
+        for skill_name in expected_skills:
+            skill_dir = skills_dir / skill_name
+            assert skill_dir.exists(), f"Skill directory not found: {skill_name}"
+            assert skill_dir.is_dir(), f"{skill_name} is not a directory"
+
+            skill_md = skill_dir / "SKILL.md"
+            assert skill_md.exists(), f"SKILL.md not found in {skill_name}"
+
+    def test_skills_have_valid_frontmatter(self):
+        """Verify all SKILL.md files have valid YAML frontmatter with description"""
+        import re
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent / "src" / "terra_mcp" / "skills"
+
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+
+            content = skill_md.read_text()
+
+            # Check for YAML frontmatter
+            assert content.startswith("---"), (
+                f"{skill_dir.name}/SKILL.md must start with YAML frontmatter (---)"
+            )
+
+            # Extract frontmatter
+            match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+            assert match, f"{skill_dir.name}/SKILL.md has malformed frontmatter"
+
+            frontmatter = match.group(1)
+            assert "description:" in frontmatter, (
+                f"{skill_dir.name}/SKILL.md frontmatter must contain 'description:'"
+            )
+
+    def test_skill_descriptions_not_empty(self):
+        """Verify skill descriptions are non-empty and meaningful"""
+        import re
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent / "src" / "terra_mcp" / "skills"
+
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+
+            content = skill_md.read_text()
+
+            # Extract description from frontmatter
+            match = re.search(r"description:\s*(.+?)(?:\n---|\n[a-z]+:)", content, re.DOTALL)
+            if match:
+                description = match.group(1).strip()
+                # Remove any quotes around the description
+                description = description.strip("\"'")
+
+                assert len(description) > 20, (
+                    f"{skill_dir.name}/SKILL.md description is too short: '{description}'"
+                )
+
+    def test_skills_have_meaningful_content(self):
+        """Verify SKILL.md files have content beyond just frontmatter"""
+        import re
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent / "src" / "terra_mcp" / "skills"
+
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+
+            content = skill_md.read_text()
+
+            # Remove frontmatter
+            content_without_fm = re.sub(r"^---.*?---\s*", "", content, flags=re.DOTALL)
+
+            # Check there's meaningful content
+            assert len(content_without_fm.strip()) > 100, (
+                f"{skill_dir.name}/SKILL.md has too little content after frontmatter"
+            )
+
+            # Check for at least one heading
+            assert "#" in content_without_fm, (
+                f"{skill_dir.name}/SKILL.md should have at least one heading"
+            )
