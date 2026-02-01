@@ -8,10 +8,12 @@ import argparse
 import json
 import re
 import sys
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.providers.skills import SkillsDirectoryProvider
 from firecloud import api as fapi
 from google.cloud import batch_v1, storage
 
@@ -27,6 +29,12 @@ mcp = FastMCP(
     ),
     mask_error_details=True,  # Hide internal errors in production
 )
+
+# Add skills provider for procedural knowledge
+# Skills are discovered from SKILL.md files in the skills directory
+skills_dir = Path(__file__).parent / "skills"
+if skills_dir.exists():
+    mcp.add_provider(SkillsDirectoryProvider(roots=skills_dir))
 
 
 # ===== Helper Functions =====

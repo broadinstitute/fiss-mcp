@@ -11,6 +11,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 - [Available Tools](#available-tools)
   - [Read-Only Tools (Always Available)](#read-only-tools-always-available)
   - [Write-Access Tools (Require --allow-writes Flag)](#write-access-tools-require---allow-writes-flag)
+- [Skills (Procedural Workflows)](#skills-procedural-workflows)
 - [Use Cases](#use-cases)
   - [Example Usage](#example-usage)
 - [Data Privacy and Security Considerations](#data-privacy-and-security-considerations)
@@ -76,6 +77,22 @@ These tools are available in both read-only mode (default) and when write access
 #### Data Management
 
 - **`upload_entities`** - Upload or update entity data in Terra data tables with validation
+
+## Skills (Procedural Workflows)
+
+This MCP server provides Skills that document common workflows and best practices. Skills are served via MCP resources for future client support.
+
+| Skill | When to Use |
+|-------|-------------|
+| `debug-workflow-failure` | Debugging failed workflow submissions, identifying error patterns, troubleshooting infrastructure issues |
+| `extract-workflow-data` | Extracting specific data from workflow metadata without loading 100K+ tokens |
+| `submit-workflow-safely` | Pre-submission verification and choosing between single-entity and batch processing |
+| `navigate-subworkflows` | Working with nested WDL subworkflows, finding subworkflow IDs |
+| `manage-context-size` | Preventing context exhaustion with scattered workflows, large data tables, or verbose metadata |
+
+Skills contain step-by-step procedures, best practices, and anti-patterns.
+
+> **Note:** Claude Code and similar agents do not currently consume MCP-served skills automatically. The procedural knowledge is also included in the tool docstrings. Skills are provided for future MCP client support and as reference documentation.
 
 ## Use Cases
 
