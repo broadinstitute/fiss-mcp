@@ -80,7 +80,7 @@ These tools are available in both read-only mode (default) and when write access
 
 ## Skills (Procedural Workflows)
 
-This MCP server provides Skills that teach Claude how to use the tools effectively for common workflows. Skills are automatically discovered and loaded when relevant to your task.
+This MCP server provides Skills that document common workflows and best practices. Skills are served via MCP resources for future client support.
 
 | Skill | When to Use |
 |-------|-------------|
@@ -90,7 +90,9 @@ This MCP server provides Skills that teach Claude how to use the tools effective
 | `navigate-subworkflows` | Working with nested WDL subworkflows, finding subworkflow IDs |
 | `manage-context-size` | Preventing context exhaustion with scattered workflows, large data tables, or verbose metadata |
 
-Skills contain step-by-step procedures, best practices, and anti-patterns. They complement tool docstrings by providing workflow-level guidance rather than individual tool usage.
+Skills contain step-by-step procedures, best practices, and anti-patterns.
+
+> **Note:** Claude Code and similar agents do not currently consume MCP-served skills automatically. The procedural knowledge is also included in the tool docstrings. Skills are provided for future MCP client support and as reference documentation.
 
 ## Use Cases
 

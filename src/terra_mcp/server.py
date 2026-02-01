@@ -878,13 +878,17 @@ async def get_submission_status(
     Returns detailed status information including overall submission status, workflow counts,
     and a summary of workflow states (Succeeded, Failed, Running, etc.).
 
+    **EFFICIENT DEBUGGING SEQUENCE (prevents context exhaustion):**
+    1. get_submission_status → identify failed workflow IDs from status_summary
+    2. get_job_metadata (summary mode) → see failed tasks with error messages (~1-2K tokens)
+    3. get_workflow_logs (URLs only) → locate log file paths without fetching content
+    4. get_workflow_logs (fetch specific) → fetch content only for failed tasks you need
+
     By default, returns the first 10 workflows for readability. Use max_workflows=0 or
     max_workflows=None to retrieve all workflows if needed for detailed analysis.
 
     By default, omits inputResolutions from workflow details to reduce response size significantly
     (typically 70-80% smaller). Set include_inputs=True to see full workflow input values.
-
-    For systematic debugging of failed submissions, see the debug-workflow-failure skill.
 
     Args:
         workspace_namespace: The billing namespace of the workspace
@@ -1019,13 +1023,30 @@ async def get_job_metadata(
 ) -> dict[str, Any]:
     """Get workflow execution metadata from Cromwell.
 
-    Two modes available:
-    - **summary** (default): Returns context-efficient summary (~1-2K tokens) with
-      workflow status, task counts, and failed task details with errors.
-    - **extract**: Get specific fields using semantic parameters (task_name, output_name,
-      shard_index) or dot-path notation (field_path).
+    **RECOMMENDED USAGE PATTERN FOR LLM AGENTS:**
 
-    For detailed extraction patterns and examples, see the extract-workflow-data skill.
+    1. START HERE - summary mode (default):
+       Returns structured, context-efficient summary (~1-2K tokens vs 100K+)
+       - Workflow status, failed tasks with errors, timing
+       - Use this to understand workflow state and identify issues
+
+    2. EXTRACT SPECIFIC DATA - extract mode with semantic parameters:
+       Get exactly what you need without loading full metadata into context
+
+       Examples:
+       - Get specific output: task_name="illumina_demux", output_name="commonBarcodes"
+       - Get shard output: task_name="task1", shard_index=5, output_name="result"
+       - Get all runtimes: field_path="calls.*.runtimeAttributes"
+       - Get all costs: field_path="calls.*.runtimeAttributes.preemptible"
+       - Get task outputs: field_path="calls.taskName[0].outputs"
+
+       Dot-path syntax:
+       - Use dots for nesting: "calls.task1.outputs"
+       - Use [N] for array indexing: "calls.task1[0].outputs"
+       - Use * for wildcards: "calls.*.executionStatus"
+
+       If you need multiple pieces of data, make multiple extract calls rather than
+       trying to get everything at once. This prevents context exhaustion.
 
     Args:
         workspace_namespace: The billing namespace of the workspace
@@ -1043,7 +1064,11 @@ async def get_job_metadata(
         - summary: Structured summary with workflow status, task counts, failures
         - extract: Extracted data with size info
 
-    Subworkflows have their own workflow IDs. See the navigate-subworkflows skill.
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         # Validate parameters
@@ -1221,8 +1246,17 @@ async def get_workflow_logs(
     by default using a smart strategy (first 5K + last 20K chars) to keep error messages
     while providing context. Set truncate=False to get full logs.
 
-    **Caution:** Scattered workflows (50+ shards) can exhaust context. Get URLs first,
-    identify failures, then fetch specific logs. See the manage-context-size skill.
+    **CONTEXT WARNING FOR SCATTERED WORKFLOWS:**
+    If the workflow uses scatter/gather with many shards (50+), fetching all log content
+    can quickly exhaust LLM context. Recommended approach:
+    1. First call with fetch_content=False to get URLs only (fast, small response)
+    2. Use get_job_metadata in summary mode to identify which tasks/shards failed
+    3. Then fetch content only for the specific failed tasks you need to debug
+
+    This tool is useful for:
+    - Debugging workflow failures (fetch stderr with truncation)
+    - Getting GCS paths to log files for external analysis
+    - Seeing execution status and retry attempts for each task
 
     Args:
         workspace_namespace: The billing namespace of the workspace
@@ -1241,7 +1275,11 @@ async def get_workflow_logs(
         - logs: Dictionary mapping task names to their log info (URLs and optionally content)
         - fetch_content: Whether content was fetched (for clarity)
 
-    Subworkflows have their own workflow IDs. See the navigate-subworkflows skill.
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching log locations for workflow {workflow_id}")
@@ -1380,7 +1418,10 @@ async def list_submissions(
     or workflow name.
 
     Each submission represents one or more workflow executions launched together.
-    For finding and debugging submissions, see the debug-workflow-failure skill.
+    Common workflow to get submission details:
+    1. Use list_submissions to find submissions in a workspace
+    2. Use get_submission_status to get detailed status for a specific submission
+    3. Use get_workflow_logs to debug failed workflows
 
     Args:
         workspace_namespace: The billing namespace of the workspace
@@ -1504,7 +1545,11 @@ async def get_workflow_outputs(
         - id: Workflow identifier
         - tasks: Task-level outputs (if available)
 
-    Subworkflows have their own workflow IDs. See the navigate-subworkflows skill.
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching outputs for workflow {workflow_id} in submission {submission_id}")
@@ -1582,7 +1627,11 @@ async def get_workflow_cost(
         - costBreakdown: Detailed breakdown by task or resource type (if available)
         - status: Whether cost calculation is complete or pending
 
-    Subworkflows have their own workflow IDs. See the navigate-subworkflows skill.
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching cost for workflow {workflow_id} in submission {submission_id}")
@@ -1652,10 +1701,27 @@ async def get_batch_job_status(
     VM provisioning, preemption), error details are NOT in standard GCS stderr logs.
     This tool retrieves those details from the Google Batch API.
 
-    Response is typically 2-3K tokens. Safe to call without context exhaustion concerns.
+    **CONTEXT SIZE:** Response is typically 2-3K tokens. Safe to call without
+    context exhaustion concerns.
 
-    Use when stderr logs don't explain the failure, or when task failed instantly
-    with empty logs. For the complete debugging workflow, see the debug-workflow-failure skill.
+    **RECOMMENDED DEBUGGING WORKFLOW:**
+    1. get_submission_status -> identify failed workflows
+    2. get_job_metadata (summary mode) -> identify failed tasks
+    3. get_workflow_logs -> check stderr for application errors
+    4. get_batch_job_status -> check infrastructure issues if logs don't explain failure
+
+    **Signs you need this tool:**
+    - Batch reports exit code 0 but task is marked failed
+    - Error says "The job was stopped before the command finished"
+    - stderr is empty or very short
+    - Task failed instantly (0 seconds runtime)
+
+    **What this tool detects:**
+    - Docker image pull failures (rate limits, not found, auth errors)
+    - VM preemption events
+    - OOM kills (exit code 137)
+    - Resource/quota exhaustion
+    - Network connectivity issues
 
     Args:
         workspace_namespace: The billing namespace of the workspace
@@ -1684,7 +1750,11 @@ async def get_batch_job_status(
         - summary: Human-readable one-line summary
         - cloud_logging_query: Ready-to-use gcloud command for deeper debugging
 
-    Subworkflows have their own workflow IDs. See the navigate-subworkflows skill.
+    **SUBWORKFLOWS:**
+    When a WDL workflow calls a subworkflow, the subworkflow gets its own workflow ID
+    (visible in parent metadata under `calls.<subworkflow_name>[*].subWorkflowId`).
+    You can use subworkflow IDs directly as the `workflow_id` parameter to inspect
+    or debug subworkflows independently.
     """
     try:
         ctx.info(f"Fetching Batch job status for task '{task_name}' in workflow {workflow_id}")
@@ -1885,8 +1955,11 @@ async def get_entities(
     Entities represent rows in Terra data tables and are used as workflow inputs.
     This tool retrieves all entities of a given type along with their attributes.
 
-    **Caution:** Large tables (100+ entities) can exhaust context. Check row counts
-    with get_workspace_data_tables first. See the manage-context-size skill.
+    **CONTEXT WARNING FOR LARGE TABLES:**
+    Data tables can contain thousands of entities, each with many attributes.
+    Before calling this tool, use get_workspace_data_tables to check row counts.
+    For tables with 100+ entities, consider whether you truly need all data,
+    or if you can work with specific entity names from workflow inputs instead.
 
     Common use cases:
     - Retrieve sample/participant data for workflow submission
@@ -2224,7 +2297,14 @@ async def submit_workflow(
     Launches a WDL workflow using a method configuration. Can submit for a single entity
     or use an entity expression for batch processing.
 
-    For pre-submission verification and submission patterns, see the submit-workflow-safely skill.
+    Before submission, verify:
+    1. Method configuration points to correct WDL version (use get_method_config)
+    2. Entity data is correct (use get_entities)
+    3. Input mappings are configured properly
+
+    Common patterns:
+    - Single entity: entity_name="sample_1", expression=None
+    - Batch processing: entity_name=None, expression="this.samples"
 
     Args:
         workspace_namespace: The billing namespace of the workspace
