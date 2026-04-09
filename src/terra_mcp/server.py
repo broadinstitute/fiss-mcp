@@ -841,10 +841,10 @@ async def get_workspace_data_tables(
             "workspace": f"{workspace_namespace}/{workspace_name}",
             "tables": [
                 {
-                    "name": entity["name"],
-                    "count": entity["count"],
+                    "name": name,
+                    "count": details["count"],
                 }
-                for entity in entity_types
+                for name, details in entity_types.items()
             ],
         }
 
