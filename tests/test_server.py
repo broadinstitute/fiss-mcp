@@ -138,10 +138,10 @@ class TestGetWorkspaceDataTables:
         """Test successful data table retrieval"""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = [
-            {"name": "participant", "count": 100},
-            {"name": "sample", "count": 500},
-        ]
+        mock_response.json.return_value = {
+            "participant": {"count": 100, "idName": "participant_id", "attributeNames": []},
+            "sample": {"count": 500, "idName": "sample_id", "attributeNames": []},
+        }
 
         with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
             # Access the underlying function from the FunctionTool wrapper
