@@ -201,11 +201,9 @@ All planned tools have been successfully implemented following test-driven devel
 - **Use feature branches**: Create a feature branch for each new feature or bug fix. This keeps the main branch clean and makes PRs easier to review.
 - **Commit message format**: Use clear, descriptive commit messages. Include a summary line, optional body, and `Co-Authored-By` trailer when appropriate.
 
-### FISS Installation Quirks
-- Firecloud requires `setuptools<80` due to deprecated `package_index` (see [fiss#192](https://github.com/broadinstitute/fiss/issues/192))
-- Must use `pip install --no-build-isolation` to use local setuptools
-- Document this in requirements.txt and installation instructions
-- GitHub Actions workflow configured with proper dependency installation order
+### FISS Installation
+- The `setuptools<80` / `--no-build-isolation` workaround (fiss#192) was removed after firecloud 0.16.39 fixed the upstream issue (fiss#200)
+- Standard `pip install -e ".[dev]"` now works without special steps
 
 ### GCS Log Fetching
 - Use `google-cloud-storage` library to fetch log content

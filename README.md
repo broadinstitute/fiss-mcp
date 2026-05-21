@@ -284,26 +284,13 @@ cd fiss-mcp
 
 2. Install dependencies:
 
-**Note**: The `firecloud` package requires special installation due to setuptools compatibility ([fiss#192](https://github.com/broadinstitute/fiss/issues/192)):
-
 ```bash
-# Install setuptools<80 first (required for firecloud)
-pip install "setuptools<80"
-
-# Install all dependencies with --no-build-isolation
-pip install --no-build-isolation -r requirements.txt
+pip install -e .
 ```
 
 For development (includes test dependencies):
 ```bash
-# Install setuptools<80 first (required for firecloud)
-pip install "setuptools<80"
-
-# Install all dependencies with --no-build-isolation
-pip install --no-build-isolation -r requirements.txt
-
-# Install additional test/development dependencies
-pip install pytest-cov ruff
+pip install -e ".[dev]"
 ```
 
 3. Verify your Google credentials are configured for FISS:
@@ -488,9 +475,7 @@ Run the test suite to verify the server implementation:
 
 ```bash
 # Install dependencies (if not already installed)
-pip install "setuptools<80"
-pip install --no-build-isolation -r requirements.txt
-pip install pytest-cov
+pip install -e ".[dev]"
 
 # Run tests
 PYTHONPATH=src pytest tests/ -v
@@ -521,7 +506,6 @@ fiss-mcp/
 │   └── server.py            # MCP server implementation
 ├── tests/
 │   └── test_server.py       # Test suite
-├── requirements.txt         # Dependencies
 ├── pyproject.toml          # Project configuration
 ├── CLAUDE.md               # Project specification
 └── README.md               # This file
@@ -652,12 +636,6 @@ echo $GOOGLE_APPLICATION_CREDENTIALS
 ### Import errors when running server
 
 Make sure you've installed all dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Or install the package in editable mode:
 
 ```bash
 pip install -e .
