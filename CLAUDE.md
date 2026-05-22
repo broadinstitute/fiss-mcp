@@ -58,10 +58,13 @@ python -m terra_mcp.server --allow-writes
 
 All planned tools have been successfully implemented following test-driven development (TDD) principles.
 
-### Workspace & Data Discovery (3 tools)
+### Workspace & Data Discovery (4 tools)
 1. ✅ `list_workspaces` - List user's accessible Terra workspaces
-2. ✅ `get_workspace_data_tables` - List data tables in a workspace
-3. ✅ `get_entities` - Read entity data from Terra data tables
+2. ✅ `get_workspace_metadata` - Get workspace metadata and attributes for dashboard documentation
+   - Returns dashboard description (markdown), custom attributes/tags, bucket name, Google project, workspace ID, creator/timestamps, lock state, normalized authorization domain group names, and caller's access level
+   - Wraps `fapi.get_workspace` (HTTP GET, read-only by design)
+3. ✅ `get_workspace_data_tables` - List data tables in a workspace
+4. ✅ `get_entities` - Read entity data from Terra data tables
    - Returns all entities of specified type with attributes
 
 ### Workflow Monitoring & Status (7 tools)
@@ -148,6 +151,7 @@ All planned tools have been successfully implemented following test-driven devel
 
 **Workspace & Discovery:**
 - `fapi.list_workspaces()` - List accessible workspaces
+- `fapi.get_workspace(namespace, workspace)` - Get workspace metadata and attributes (dashboard data)
 - `fapi.list_entity_types(namespace, workspace)` - List data tables
 - `fapi.get_entities(namespace, workspace, etype)` - Get all entities of a type
 
