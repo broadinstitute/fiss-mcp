@@ -43,6 +43,7 @@ These tools are available in both read-only mode (default) and when write access
 #### Workspace & Data Discovery
 
 - **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
+- **`get_workspace_metadata`** - Get workspace metadata and attributes for dashboard documentation (description, bucket, Google project, access level, authorization domain, timestamps)
 - **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
 - **`get_entities`** - Read entity data from Terra data tables for workflow inputs
 
