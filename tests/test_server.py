@@ -41,6 +41,7 @@ class TestServerInitialization:
 
         # Verify all Phase 1 tools are present
         assert "list_workspaces" in tool_names
+        assert "get_workspace_metadata" in tool_names
         assert "get_workspace_data_tables" in tool_names
         assert "get_submission_status" in tool_names
         assert "get_job_metadata" in tool_names
@@ -128,6 +129,219 @@ class TestListWorkspaces:
 
             assert "Failed to fetch workspaces" in str(exc_info.value)
             assert "500" in str(exc_info.value)
+
+
+class TestGetWorkspaceMetadata:
+    """Test get_workspace_metadata tool"""
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_success(self):
+        """Test successful workspace metadata retrieval"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "accessLevel": "OWNER",
+            "workspace": {
+                "namespace": "test-ns",
+                "name": "test-ws",
+                "workspaceId": "abc-123",
+                "bucketName": "fc-abc-123",
+                "googleProject": "broad-test-project",
+                "createdBy": "user@example.com",
+                "createdDate": "2024-01-01T00:00:00Z",
+                "lastModified": "2024-02-01T00:00:00Z",
+                "isLocked": False,
+                "authorizationDomain": [
+                    {"membersGroupName": "auth-domain-1"},
+                ],
+                "attributes": {
+                    "description": "# Dashboard\nThis is the dashboard description.",
+                    "tag:tags": {"itemsType": "AttributeValue", "items": ["wgs", "qc"]},
+                    "custom_field": "custom_value",
+                },
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+            result = await get_workspace_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+            )
+
+            assert result["workspace"] == "test-ns/test-ws"
+            assert result["description"] == "# Dashboard\nThis is the dashboard description."
+            assert result["attributes"]["custom_field"] == "custom_value"
+            assert "tag:tags" in result["attributes"]
+            assert result["bucket_name"] == "fc-abc-123"
+            assert result["google_project"] == "broad-test-project"
+            assert result["workspace_id"] == "abc-123"
+            assert result["created_by"] == "user@example.com"
+            assert result["created_date"] == "2024-01-01T00:00:00Z"
+            assert result["last_modified"] == "2024-02-01T00:00:00Z"
+            assert result["is_locked"] is False
+            assert result["authorization_domain"] == ["auth-domain-1"]
+            assert result["access_level"] == "OWNER"
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_empty_attributes(self):
+        """Test workspace with no description and no attributes"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "accessLevel": "READER",
+            "workspace": {
+                "namespace": "test-ns",
+                "name": "test-ws",
+                "workspaceId": "xyz-789",
+                "bucketName": "fc-xyz-789",
+                "googleProject": "test-project",
+                "createdBy": "user@example.com",
+                "createdDate": "2024-01-01T00:00:00Z",
+                "lastModified": "2024-01-01T00:00:00Z",
+                "isLocked": True,
+                "authorizationDomain": [],
+                "attributes": {},
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+            result = await get_workspace_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+            )
+
+            assert result["description"] == ""
+            assert result["attributes"] == {}
+            assert result["authorization_domain"] == []
+            assert result["is_locked"] is True
+            assert result["access_level"] == "READER"
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_missing_attributes_key(self):
+        """Test workspace where 'attributes' key is missing entirely"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "accessLevel": "OWNER",
+            "workspace": {
+                "namespace": "test-ns",
+                "name": "test-ws",
+            },
+        }
+
+        with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+            result = await get_workspace_metadata_fn(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                ctx=ctx,
+            )
+
+            assert result["description"] == ""
+            assert result["attributes"] == {}
+            assert result["bucket_name"] is None
+            assert result["is_locked"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_not_found(self):
+        """Test handling of non-existent workspace"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workspace_metadata_fn(
+                    workspace_namespace="nonexistent",
+                    workspace_name="workspace",
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "not found" in error_msg
+            assert "nonexistent/workspace" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_access_denied(self):
+        """Test handling of permission errors"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+
+        with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workspace_metadata_fn(
+                    workspace_namespace="restricted",
+                    workspace_name="workspace",
+                    ctx=ctx,
+                )
+
+            assert "Access denied" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_server_error(self):
+        """Test handling of unexpected HTTP error"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workspace_metadata_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    ctx=ctx,
+                )
+
+            assert "HTTP 500" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_metadata_unexpected_exception(self):
+        """Test handling of unexpected exception during API call"""
+        from fastmcp.exceptions import ToolError
+
+        with patch(
+            "terra_mcp.server.fapi.get_workspace",
+            side_effect=ConnectionError("network failure"),
+        ):
+            get_workspace_metadata_fn = terra_server.get_workspace_metadata
+
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await get_workspace_metadata_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    ctx=ctx,
+                )
+
+            assert "Failed to fetch workspace metadata" in str(exc_info.value)
 
 
 class TestGetWorkspaceDataTables:

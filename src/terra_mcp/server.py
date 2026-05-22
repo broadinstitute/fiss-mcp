@@ -793,6 +793,108 @@ async def list_workspaces(ctx: Context) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+async def get_workspace_metadata(
+    workspace_namespace: Annotated[str, "Terra workspace namespace"],
+    workspace_name: Annotated[str, "Terra workspace name"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Get workspace metadata and attributes for dashboard documentation.
+
+    Returns the workspace's dashboard description, custom attributes, and core
+    metadata (bucket name, Google project, access level, owners, authorization
+    domain, timestamps). This is the read-only equivalent of the Terra
+    workspace dashboard view.
+
+    Common use cases:
+    - Read the dashboard description (markdown) for a workspace
+    - Inspect workspace tags and custom attributes
+    - Verify bucket name / Google project for downstream data access
+    - Check authorization domain and access level before running workflows
+
+    Args:
+        workspace_namespace: The billing namespace of the workspace
+        workspace_name: The name of the workspace
+
+    Returns:
+        Dictionary containing:
+        - workspace: Full workspace identifier (namespace/name)
+        - description: Dashboard description text (from attributes.description),
+          or empty string if unset
+        - attributes: All workspace attributes including tags and custom fields
+          (raw dict as returned by FISS, with "description" included)
+        - bucket_name: GCS bucket associated with this workspace
+        - google_project: Google Cloud project ID
+        - workspace_id: Workspace UUID
+        - created_by: Email of workspace creator
+        - created_date: Creation timestamp (ISO 8601)
+        - last_modified: Last modification timestamp (ISO 8601)
+        - is_locked: Whether workspace is locked against modification
+        - authorization_domain: List of authorization domain group names
+        - access_level: Caller's access level (OWNER, WRITER, READER, etc.)
+    """
+    try:
+        ctx.info(f"Fetching workspace metadata for {workspace_namespace}/{workspace_name}")
+
+        response = fapi.get_workspace(workspace_namespace, workspace_name)
+
+        if response.status_code == 404:
+            raise ToolError(
+                f"Workspace '{workspace_namespace}/{workspace_name}' not found. "
+                "Please verify the workspace namespace and name are correct."
+            )
+        elif response.status_code == 403:
+            raise ToolError(
+                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                "You may not have permission to view this workspace."
+            )
+        elif response.status_code != 200:
+            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            raise ToolError(
+                f"Failed to fetch workspace metadata (HTTP {response.status_code}). "
+                "Please check the workspace exists and you have access."
+            )
+
+        data = response.json()
+        ws = data.get("workspace", {})
+        attributes = ws.get("attributes", {}) or {}
+
+        # Normalize authorization domain to a list of group names
+        auth_domain_raw = ws.get("authorizationDomain", []) or []
+        auth_domain = [
+            entry.get("membersGroupName", entry) if isinstance(entry, dict) else entry
+            for entry in auth_domain_raw
+        ]
+
+        ctx.info(
+            f"Successfully retrieved metadata for {workspace_namespace}/{workspace_name} "
+            f"({len(attributes)} attributes)"
+        )
+
+        return {
+            "workspace": f"{workspace_namespace}/{workspace_name}",
+            "description": attributes.get("description", ""),
+            "attributes": attributes,
+            "bucket_name": ws.get("bucketName"),
+            "google_project": ws.get("googleProject"),
+            "workspace_id": ws.get("workspaceId"),
+            "created_by": ws.get("createdBy"),
+            "created_date": ws.get("createdDate"),
+            "last_modified": ws.get("lastModified"),
+            "is_locked": ws.get("isLocked", False),
+            "authorization_domain": auth_domain,
+            "access_level": data.get("accessLevel"),
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        ctx.error(f"Unexpected error fetching workspace metadata: {type(e).__name__}: {e}")
+        raise ToolError(
+            f"Failed to fetch workspace metadata for {workspace_namespace}/{workspace_name}"
+        )
+
+
+@mcp.tool()
 async def get_workspace_data_tables(
     workspace_namespace: Annotated[str, "Terra workspace namespace"],
     workspace_name: Annotated[str, "Terra workspace name"],
