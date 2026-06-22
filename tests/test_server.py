@@ -63,6 +63,12 @@ class TestServerInitialization:
         # Verify all Phase 4 tools are present
         assert "upload_entities" in tool_names
 
+        # Verify GCS read-only tools are present
+        assert "list_gcs_objects" in tool_names
+        assert "get_gcs_object_metadata" in tool_names
+        assert "read_gcs_object" in tool_names
+        assert "download_gcs_file" in tool_names
+
 
 class TestListWorkspaces:
     """Test list_workspaces tool"""
@@ -1868,6 +1874,727 @@ class TestGCSLogFetching:
             assert result is None
             # Verify error was logged
             ctx.error.assert_called()
+
+
+# ===== GCS Read-Only Tools Tests =====
+
+
+class TestParseGcsUri:
+    """Test _parse_gcs_uri helper"""
+
+    def test_valid_uri_with_path(self):
+        from terra_mcp.server import _parse_gcs_uri
+
+        assert _parse_gcs_uri("gs://my-bucket/path/to/file.txt") == (
+            "my-bucket",
+            "path/to/file.txt",
+        )
+
+    def test_valid_uri_with_single_segment(self):
+        from terra_mcp.server import _parse_gcs_uri
+
+        assert _parse_gcs_uri("gs://my-bucket/file.txt") == ("my-bucket", "file.txt")
+
+    def test_valid_uri_bucket_only(self):
+        from terra_mcp.server import _parse_gcs_uri
+
+        assert _parse_gcs_uri("gs://my-bucket") == ("my-bucket", "")
+
+    def test_valid_uri_bucket_trailing_slash(self):
+        from terra_mcp.server import _parse_gcs_uri
+
+        assert _parse_gcs_uri("gs://my-bucket/") == ("my-bucket", "")
+
+    def test_missing_scheme(self):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp.server import _parse_gcs_uri
+
+        with pytest.raises(ToolError, match="must start with 'gs://'"):
+            _parse_gcs_uri("http://bucket/file")
+
+    def test_empty_string(self):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp.server import _parse_gcs_uri
+
+        with pytest.raises(ToolError):
+            _parse_gcs_uri("")
+
+    def test_non_string_input(self):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp.server import _parse_gcs_uri
+
+        with pytest.raises(ToolError):
+            _parse_gcs_uri(None)  # type: ignore[arg-type]
+
+    def test_missing_bucket(self):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp.server import _parse_gcs_uri
+
+        with pytest.raises(ToolError, match="missing bucket"):
+            _parse_gcs_uri("gs://")
+
+    def test_leading_slash_after_scheme(self):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp.server import _parse_gcs_uri
+
+        with pytest.raises(ToolError, match="missing bucket"):
+            _parse_gcs_uri("gs:///path/file")
+
+
+def _make_mock_blob(
+    name="file.txt",
+    size=100,
+    content_type="text/plain",
+    updated_iso="2026-01-01T00:00:00Z",
+    md5="abc==",
+    crc32c="def==",
+    storage_class="STANDARD",
+    metadata=None,
+    generation=1,
+    metageneration=1,
+):
+    """Build a MagicMock blob with typical fields used by GCS tools."""
+    from datetime import datetime
+    from unittest.mock import Mock
+
+    blob = Mock()
+    blob.name = name
+    blob.size = size
+    blob.content_type = content_type
+    ts = datetime.fromisoformat(updated_iso.replace("Z", "+00:00"))
+    blob.updated = ts
+    blob.time_created = ts
+    blob.md5_hash = md5
+    blob.crc32c = crc32c
+    blob.generation = generation
+    blob.metageneration = metageneration
+    blob.storage_class = storage_class
+    blob.metadata = metadata
+    return blob
+
+
+class TestListGcsObjects:
+    """Test list_gcs_objects tool"""
+
+    @pytest.mark.asyncio
+    async def test_list_success_multiple_objects(self):
+        blob1 = _make_mock_blob(name="a.txt", size=100)
+        blob2 = _make_mock_blob(name="b.txt", size=200, md5="xyz==")
+
+        mock_iter = MagicMock()
+        mock_iter.__iter__ = lambda self: iter([blob1, blob2])
+        mock_iter.prefixes = set()
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.return_value = mock_iter
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.list_gcs_objects(
+                "gs://my-bucket/prefix/", ctx, max_results=10
+            )
+
+        assert result["uri"] == "gs://my-bucket/prefix/"
+        assert result["bucket"] == "my-bucket"
+        assert result["prefix"] == "prefix/"
+        assert len(result["objects"]) == 2
+        assert result["objects"][0]["name"] == "a.txt"
+        assert result["objects"][0]["size"] == 100
+        assert result["objects"][1]["md5_hash"] == "xyz=="
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_list_truncation_detection(self):
+        # Return max_results items - should mark truncated=True
+        blobs = [_make_mock_blob(name=f"f{i}.txt") for i in range(5)]
+        mock_iter = MagicMock()
+        mock_iter.__iter__ = lambda self: iter(blobs)
+        mock_iter.prefixes = set()
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.return_value = mock_iter
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.list_gcs_objects("gs://my-bucket", ctx, max_results=5)
+
+        assert len(result["objects"]) == 5
+        assert result["truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_list_non_recursive_returns_prefixes(self):
+        blob = _make_mock_blob(name="root.txt")
+        mock_iter = MagicMock()
+        mock_iter.__iter__ = lambda self: iter([blob])
+        mock_iter.prefixes = {"subdir1/", "subdir2/"}
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.return_value = mock_iter
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.list_gcs_objects("gs://my-bucket", ctx, recursive=False)
+
+        # list_blobs was called with delimiter="/"
+        kwargs = mock_client.list_blobs.call_args.kwargs
+        assert kwargs["delimiter"] == "/"
+        assert sorted(result["prefixes"]) == ["subdir1/", "subdir2/"]
+
+    @pytest.mark.asyncio
+    async def test_list_recursive_no_delimiter(self):
+        mock_iter = MagicMock()
+        mock_iter.__iter__ = lambda self: iter([])
+        mock_iter.prefixes = set()
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.return_value = mock_iter
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            await terra_server.list_gcs_objects("gs://my-bucket", ctx, recursive=True)
+
+        kwargs = mock_client.list_blobs.call_args.kwargs
+        assert kwargs["delimiter"] is None
+
+    @pytest.mark.asyncio
+    async def test_list_malformed_uri_raises(self):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        with pytest.raises(ToolError, match="must start with 'gs://'"):
+            await terra_server.list_gcs_objects("http://bucket", ctx)
+
+    @pytest.mark.asyncio
+    async def test_list_not_found_maps_to_tool_error(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.side_effect = Exception("404 NotFound: no such bucket")
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="not found"):
+                await terra_server.list_gcs_objects("gs://no-such-bucket", ctx)
+
+    @pytest.mark.asyncio
+    async def test_list_forbidden_maps_to_tool_error(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.side_effect = Exception("403 Forbidden: access denied")
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="Access denied"):
+                await terra_server.list_gcs_objects("gs://private-bucket", ctx)
+
+
+class TestGetGcsObjectMetadata:
+    """Test get_gcs_object_metadata tool"""
+
+    @pytest.mark.asyncio
+    async def test_metadata_success(self):
+        blob = _make_mock_blob(
+            name="path/file.bam",
+            size=12345,
+            content_type="application/octet-stream",
+            metadata={"custom_key": "custom_val"},
+        )
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.get_gcs_object_metadata("gs://my-bucket/path/file.bam", ctx)
+
+        assert result["uri"] == "gs://my-bucket/path/file.bam"
+        assert result["bucket"] == "my-bucket"
+        assert result["name"] == "path/file.bam"
+        assert result["size"] == 12345
+        assert result["content_type"] == "application/octet-stream"
+        assert result["custom_metadata"] == {"custom_key": "custom_val"}
+        assert result["storage_class"] == "STANDARD"
+        assert result["time_created"] is not None
+
+    @pytest.mark.asyncio
+    async def test_metadata_not_found(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = None
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="not found"):
+                await terra_server.get_gcs_object_metadata("gs://my-bucket/missing.txt", ctx)
+
+    @pytest.mark.asyncio
+    async def test_metadata_bucket_only_uri_rejected(self):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        with pytest.raises(ToolError, match="refers to a bucket"):
+            await terra_server.get_gcs_object_metadata("gs://my-bucket", ctx)
+
+    @pytest.mark.asyncio
+    async def test_metadata_forbidden(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.side_effect = Exception("403 Forbidden")
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="Access denied"):
+                await terra_server.get_gcs_object_metadata("gs://my-bucket/restricted.txt", ctx)
+
+    @pytest.mark.asyncio
+    async def test_metadata_empty_custom_metadata(self):
+        blob = _make_mock_blob(metadata=None)
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.get_gcs_object_metadata("gs://my-bucket/file.txt", ctx)
+
+        assert result["custom_metadata"] == {}
+
+
+class TestReadGcsObject:
+    """Test read_gcs_object tool"""
+
+    @pytest.mark.asyncio
+    async def test_read_text_under_cap(self):
+        text = "hello, world\n"
+        blob = _make_mock_blob(size=len(text.encode()), content_type="text/plain")
+        blob.download_as_bytes.return_value = text.encode("utf-8")
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.read_gcs_object("gs://my-bucket/hello.txt", ctx)
+
+        assert result["encoding"] == "utf-8"
+        assert result["content"] == text
+        assert result["bytes_read"] == len(text.encode())
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_read_truncation_when_file_larger_than_cap(self):
+        # File is 1000 bytes, cap at 100
+        data = b"x" * 100  # what we'd "read"
+        blob = _make_mock_blob(size=1000)
+        blob.download_as_bytes.return_value = data
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.read_gcs_object(
+                "gs://my-bucket/big.txt", ctx, max_bytes=100
+            )
+
+        assert result["bytes_read"] == 100
+        assert result["truncated"] is True
+        # download_as_bytes called with proper range
+        kwargs = blob.download_as_bytes.call_args.kwargs
+        assert kwargs["start"] == 0
+        assert kwargs["end"] == 99  # inclusive
+
+    @pytest.mark.asyncio
+    async def test_read_offset_partial(self):
+        # Read from middle of file
+        blob = _make_mock_blob(size=500)
+        blob.download_as_bytes.return_value = b"middle-bytes"
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.read_gcs_object(
+                "gs://my-bucket/file.txt", ctx, max_bytes=50, offset=200
+            )
+
+        kwargs = blob.download_as_bytes.call_args.kwargs
+        assert kwargs["start"] == 200
+        assert kwargs["end"] == 249
+        assert result["offset"] == 200
+
+    @pytest.mark.asyncio
+    async def test_read_binary_returned_as_base64(self):
+        import base64
+
+        # Bytes that are NOT valid utf-8 (e.g. gzip magic)
+        raw = b"\x1f\x8b\x08\x00\x80\x81\xff\xfe"
+        blob = _make_mock_blob(size=len(raw), content_type="application/gzip")
+        blob.download_as_bytes.return_value = raw
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.read_gcs_object("gs://my-bucket/data.gz", ctx)
+
+        assert result["encoding"] == "base64"
+        assert "content" not in result
+        assert base64.b64decode(result["content_base64"]) == raw
+
+    @pytest.mark.asyncio
+    async def test_read_offset_past_eof(self):
+        blob = _make_mock_blob(size=100)
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.read_gcs_object("gs://my-bucket/small.txt", ctx, offset=500)
+
+        assert result["bytes_read"] == 0
+        assert result["content"] == ""
+        # Should not have called download_as_bytes
+        blob.download_as_bytes.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_read_not_found(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = None
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="not found"):
+                await terra_server.read_gcs_object("gs://my-bucket/missing.txt", ctx)
+
+    @pytest.mark.asyncio
+    async def test_read_bucket_only_uri_rejected(self):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        with pytest.raises(ToolError, match="refers to a bucket"):
+            await terra_server.read_gcs_object("gs://my-bucket", ctx)
+
+    @pytest.mark.asyncio
+    async def test_read_negative_max_bytes_rejected(self):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        with pytest.raises(ToolError, match="max_bytes must be positive"):
+            await terra_server.read_gcs_object("gs://my-bucket/file.txt", ctx, max_bytes=0)
+
+    @pytest.mark.asyncio
+    async def test_read_negative_offset_rejected(self):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        with pytest.raises(ToolError, match="offset must be non-negative"):
+            await terra_server.read_gcs_object("gs://my-bucket/file.txt", ctx, offset=-1)
+
+    @pytest.mark.asyncio
+    async def test_read_forbidden(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.side_effect = Exception("403 Forbidden")
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="Access denied"):
+                await terra_server.read_gcs_object("gs://my-bucket/restricted.txt", ctx)
+
+
+class TestDownloadGcsFile:
+    """Test download_gcs_file tool"""
+
+    @pytest.mark.asyncio
+    async def test_download_success(self, tmp_path):
+        # Set up a mock blob whose download_to_filename writes 100 bytes
+        data = b"x" * 100
+        blob = _make_mock_blob(size=len(data), md5="hash==")
+
+        def fake_download(path):
+            with open(path, "wb") as f:
+                f.write(data)
+
+        blob.download_to_filename.side_effect = fake_download
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+        local = str(tmp_path / "out.bin")
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.download_gcs_file(
+                "gs://my-bucket/path/file.bin", local, ctx
+            )
+
+        assert result["local_path"] == local
+        assert result["bytes_downloaded"] == 100
+        assert result["md5_hash"] == "hash=="
+        assert result["source_uri"] == "gs://my-bucket/path/file.bin"
+
+    @pytest.mark.asyncio
+    async def test_download_refuses_existing_without_overwrite(self, tmp_path):
+        from fastmcp.exceptions import ToolError
+
+        existing = tmp_path / "existing.bin"
+        existing.write_bytes(b"original")
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client"):
+            with pytest.raises(ToolError, match="already exists"):
+                await terra_server.download_gcs_file("gs://my-bucket/file.bin", str(existing), ctx)
+
+        # Original content untouched
+        assert existing.read_bytes() == b"original"
+
+    @pytest.mark.asyncio
+    async def test_download_replaces_with_overwrite_true(self, tmp_path):
+        existing = tmp_path / "existing.bin"
+        existing.write_bytes(b"original")
+
+        new_data = b"new-content"
+        blob = _make_mock_blob(size=len(new_data))
+
+        def fake_download(path):
+            with open(path, "wb") as f:
+                f.write(new_data)
+
+        blob.download_to_filename.side_effect = fake_download
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.download_gcs_file(
+                "gs://my-bucket/file.bin",
+                str(existing),
+                ctx,
+                overwrite=True,
+            )
+
+        assert result["bytes_downloaded"] == len(new_data)
+        assert existing.read_bytes() == new_data
+
+    @pytest.mark.asyncio
+    async def test_download_auto_creates_parent_dir(self, tmp_path):
+        nested = tmp_path / "a" / "b" / "c" / "out.bin"
+        data = b"hello"
+        blob = _make_mock_blob(size=len(data))
+
+        def fake_download(path):
+            with open(path, "wb") as f:
+                f.write(data)
+
+        blob.download_to_filename.side_effect = fake_download
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+
+        assert not nested.parent.exists()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.download_gcs_file(
+                "gs://my-bucket/file.bin", str(nested), ctx
+            )
+
+        assert nested.parent.exists()
+        assert result["bytes_downloaded"] == len(data)
+
+    @pytest.mark.asyncio
+    async def test_download_disk_check_refuses_big_file(self, tmp_path):
+        from collections import namedtuple
+
+        from fastmcp.exceptions import ToolError
+
+        # Pretend file is huge, free space is tiny
+        blob = _make_mock_blob(size=10**12)  # 1 TB
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
+        small_free = DiskUsage(total=10**10, used=10**9, free=10**9)  # 1 GB free
+
+        ctx = MagicMock()
+        local = str(tmp_path / "huge.bin")
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with patch("shutil.disk_usage", return_value=small_free):
+                with pytest.raises(ToolError, match="free disk space"):
+                    await terra_server.download_gcs_file("gs://my-bucket/huge.bin", local, ctx)
+
+        # Nothing got downloaded
+        blob.download_to_filename.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_download_skip_disk_check_allows_huge(self, tmp_path):
+        # skip_disk_check=True bypasses the safety check even when free space is low
+        from collections import namedtuple
+
+        data = b"x" * 1000
+        blob = _make_mock_blob(size=len(data))
+
+        def fake_download(path):
+            with open(path, "wb") as f:
+                f.write(data)
+
+        blob.download_to_filename.side_effect = fake_download
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
+        small_free = DiskUsage(total=2000, used=1500, free=500)
+
+        ctx = MagicMock()
+        local = str(tmp_path / "out.bin")
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with patch("shutil.disk_usage", return_value=small_free):
+                result = await terra_server.download_gcs_file(
+                    "gs://my-bucket/file.bin",
+                    local,
+                    ctx,
+                    skip_disk_check=True,
+                )
+
+        assert result["bytes_downloaded"] == len(data)
+
+    @pytest.mark.asyncio
+    async def test_download_size_mismatch_deletes_partial(self, tmp_path):
+        from fastmcp.exceptions import ToolError
+
+        # Claim 100 bytes but write only 50 -> mismatch
+        blob = _make_mock_blob(size=100)
+
+        def fake_download(path):
+            with open(path, "wb") as f:
+                f.write(b"x" * 50)
+
+        blob.download_to_filename.side_effect = fake_download
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = blob
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+        local = tmp_path / "partial.bin"
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="does not match"):
+                await terra_server.download_gcs_file("gs://my-bucket/file.bin", str(local), ctx)
+
+        # Partial file removed
+        assert not local.exists()
+
+    @pytest.mark.asyncio
+    async def test_download_relative_path_rejected(self, tmp_path):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        with pytest.raises(ToolError, match="must be absolute"):
+            await terra_server.download_gcs_file(
+                "gs://my-bucket/file.bin", "relative/path.bin", ctx
+            )
+
+    @pytest.mark.asyncio
+    async def test_download_not_found(self, tmp_path):
+        from fastmcp.exceptions import ToolError
+
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.return_value = None
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+        local = str(tmp_path / "out.bin")
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="not found"):
+                await terra_server.download_gcs_file("gs://my-bucket/missing.bin", local, ctx)
+
+    @pytest.mark.asyncio
+    async def test_download_bucket_only_uri_rejected(self, tmp_path):
+        from fastmcp.exceptions import ToolError
+
+        ctx = MagicMock()
+        local = str(tmp_path / "out.bin")
+        with pytest.raises(ToolError, match="refers to a bucket"):
+            await terra_server.download_gcs_file("gs://my-bucket", local, ctx)
+
+    @pytest.mark.asyncio
+    async def test_download_forbidden(self, tmp_path):
+        from fastmcp.exceptions import ToolError
+
+        mock_bucket = MagicMock()
+        mock_bucket.get_blob.side_effect = Exception("403 Forbidden")
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+
+        ctx = MagicMock()
+        local = str(tmp_path / "out.bin")
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            with pytest.raises(ToolError, match="Access denied"):
+                await terra_server.download_gcs_file("gs://my-bucket/restricted.bin", local, ctx)
 
 
 # ===== Phase 3: Workflow Management Tools Tests =====

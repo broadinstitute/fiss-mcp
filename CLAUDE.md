@@ -126,6 +126,27 @@ All planned tools have been successfully implemented following test-driven devel
     - Supports batch uploads of multiple entities
     - Comprehensive error handling for invalid data
 
+### GCS Bucket Access (4 tools, read-only)
+17. ✅ `list_gcs_objects` - List objects in a GCS bucket or under a prefix
+    - Supports recursive (default) or `ls`-style listing via `recursive=False` (uses `/` as delimiter)
+    - `max_results` parameter caps return size; reports `truncated` flag
+    - Returns objects with `name`, `size`, `content_type`, `updated`, `md5_hash`
+18. ✅ `get_gcs_object_metadata` - Get metadata for a single GCS object
+    - Returns size, content type, md5/crc32c hashes, timestamps, storage class
+    - Does NOT download object content (cheap, fast)
+    - Useful for size-checking before downloads
+19. ✅ `read_gcs_object` - Read a portion of a GCS object inline
+    - 100 KB default `max_bytes` cap to protect MCP context budget
+    - Configurable `offset` for reading from middle of large files
+    - Text content (UTF-8 decodable) returned in `content`
+    - Binary content (gzip, BAM, etc.) returned base64-encoded in `content_base64`
+20. ✅ `download_gcs_file` - Stream a complete GCS file to local disk
+    - Safety: refuses to overwrite existing files unless `overwrite=True`
+    - Safety: refuses if download would consume >90% of free disk space unless `skip_disk_check=True`
+    - Safety: verifies downloaded size matches GCS metadata, deletes partial file on mismatch
+    - Auto-creates parent directories via `os.makedirs(exist_ok=True)`
+    - Suitable for files too large for context (BAMs, FASTQs, large VCFs)
+
 ## FISS/Terra Context
 
 ### Key Terra Concepts
@@ -174,6 +195,13 @@ All planned tools have been successfully implemented following test-driven devel
 
 **Google Batch API:**
 - `batch_v1.BatchServiceClient.get_job(name)` - Get Batch job status and events for infrastructure debugging
+
+**Google Cloud Storage (read-only):**
+- `storage.Client()` - GCS client using Application Default Credentials
+- `client.list_blobs(bucket, prefix=, max_results=, delimiter=)` - List objects in a bucket/prefix
+- `client.bucket(name).get_blob(blob_name)` - Get a single blob by name (returns None if not found)
+- `blob.download_as_bytes(start=, end=)` - Download a byte range (inclusive end)
+- `blob.download_to_filename(path)` - Stream a complete blob to local disk
 
 ## Development Notes & Learnings
 

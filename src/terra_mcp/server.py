@@ -1493,6 +1493,445 @@ async def get_workflow_logs(
         )
 
 
+# ===== GCS Read-Only Tools =====
+
+
+def _parse_gcs_uri(uri: str) -> tuple[str, str]:
+    """Parse a gs:// URI into (bucket, blob_name).
+
+    Args:
+        uri: GCS URI like gs://bucket/path/to/file or gs://bucket
+
+    Returns:
+        Tuple of (bucket_name, blob_name). blob_name is "" for bucket-only URIs.
+
+    Raises:
+        ToolError: If URI is malformed
+    """
+    if not uri or not isinstance(uri, str):
+        raise ToolError(f"Invalid GCS URI: must be a non-empty string, got {type(uri).__name__}")
+    if not uri.startswith("gs://"):
+        raise ToolError(f"Invalid GCS URI '{uri}': must start with 'gs://'")
+
+    rest = uri[5:]
+    if not rest or rest.startswith("/"):
+        raise ToolError(f"Invalid GCS URI '{uri}': missing bucket name")
+
+    parts = rest.split("/", 1)
+    bucket = parts[0]
+    blob_name = parts[1] if len(parts) == 2 else ""
+
+    if not bucket:
+        raise ToolError(f"Invalid GCS URI '{uri}': missing bucket name")
+
+    return bucket, blob_name
+
+
+@mcp.tool()
+async def list_gcs_objects(
+    gcs_uri: Annotated[str, "GCS URI to list. Format: gs://bucket or gs://bucket/prefix"],
+    ctx: Context,
+    max_results: Annotated[int, "Maximum number of objects to return"] = 100,
+    recursive: Annotated[
+        bool,
+        "If True, list recursively. If False, list only immediate children (treats / as delimiter)",
+    ] = True,
+) -> dict[str, Any]:
+    """List objects in a GCS bucket or under a prefix.
+
+    Lists objects (files) in a Google Cloud Storage bucket, optionally filtered
+    by a prefix. This is the GCS equivalent of `ls` on a directory.
+
+    Authentication uses Google Application Default Credentials (ADC) - same as
+    the FISS API. The caller must have read access to the target bucket.
+
+    Common use cases:
+    - Explore a workspace bucket to find workflow outputs
+    - List input files in a reference data bucket before launching a workflow
+    - Verify expected files were produced by a workflow run
+
+    Cost note: GCS list operations are cheap (~$0.05 per 10,000 requests) but
+    egress costs apply if the bucket is in a different region.
+
+    Args:
+        gcs_uri: GCS URI like gs://my-bucket or gs://my-bucket/some/prefix/
+        max_results: Maximum number of objects to return (default: 100)
+        recursive: If True (default), list all objects recursively. If False,
+            list only immediate children (uses / as a delimiter, similar to ls).
+
+    Returns:
+        Dictionary with:
+        - uri: The queried URI
+        - bucket: Bucket name
+        - prefix: Prefix used for filtering (empty if listing whole bucket)
+        - objects: List of object dicts (name, size, content_type, updated, md5_hash)
+        - prefixes: List of "subdirectory" prefixes (only populated when recursive=False)
+        - truncated: True if more objects exist beyond max_results
+    """
+    try:
+        bucket_name, prefix = _parse_gcs_uri(gcs_uri)
+        ctx.info(
+            f"Listing objects in gs://{bucket_name}/{prefix} "
+            f"(max {max_results}, recursive={recursive})"
+        )
+
+        client = storage.Client()
+        delimiter = None if recursive else "/"
+
+        iterator = client.list_blobs(
+            bucket_name,
+            prefix=prefix if prefix else None,
+            max_results=max_results + 1,
+            delimiter=delimiter,
+        )
+
+        objects = []
+        for blob in iterator:
+            if len(objects) >= max_results:
+                break
+            objects.append(
+                {
+                    "name": blob.name,
+                    "size": blob.size,
+                    "content_type": blob.content_type,
+                    "updated": blob.updated.isoformat() if blob.updated else None,
+                    "md5_hash": blob.md5_hash,
+                }
+            )
+
+        prefixes = sorted(iterator.prefixes) if delimiter else []
+        truncated = len(objects) >= max_results
+
+        ctx.info(f"Listed {len(objects)} objects, {len(prefixes)} prefixes")
+
+        return {
+            "uri": gcs_uri,
+            "bucket": bucket_name,
+            "prefix": prefix,
+            "objects": objects,
+            "prefixes": list(prefixes),
+            "truncated": truncated,
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        err_name = type(e).__name__
+        err_msg = str(e)
+        ctx.error(f"Failed to list GCS objects: {err_name}: {err_msg}")
+        if "NotFound" in err_name or "404" in err_msg:
+            raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
+        if "Forbidden" in err_name or "403" in err_msg:
+            raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
+        raise ToolError(f"Failed to list GCS objects at {gcs_uri}: {err_name}: {err_msg}")
+
+
+@mcp.tool()
+async def get_gcs_object_metadata(
+    gcs_uri: Annotated[str, "GCS URI like gs://bucket/path/to/file"],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Get metadata for a single GCS object.
+
+    Returns size, content type, hashes, timestamps, and other metadata for a
+    file in Google Cloud Storage. Does NOT download the file content.
+
+    Common use cases:
+    - Check file size before deciding to download (avoid bandwidth costs)
+    - Verify content type (text vs binary)
+    - Confirm a file exists at a given URI
+    - Compare md5 hashes for integrity checking
+
+    Args:
+        gcs_uri: GCS URI like gs://bucket/path/to/file
+
+    Returns:
+        Dictionary with:
+        - uri, bucket, name: URI components
+        - size: Size in bytes
+        - content_type: MIME type
+        - md5_hash, crc32c: Checksums (base64)
+        - time_created, updated: Timestamps (ISO 8601)
+        - generation, metageneration: GCS generation numbers
+        - storage_class: e.g. STANDARD, NEARLINE
+        - custom_metadata: User-set metadata dict (empty if none)
+    """
+    try:
+        bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
+        if not blob_name:
+            raise ToolError(
+                f"URI '{gcs_uri}' refers to a bucket, not an object. Include an object path."
+            )
+
+        ctx.info(f"Fetching metadata for {gcs_uri}")
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.get_blob(blob_name)
+
+        if blob is None:
+            raise ToolError(f"Object not found: {gcs_uri}")
+
+        return {
+            "uri": gcs_uri,
+            "bucket": bucket_name,
+            "name": blob.name,
+            "size": blob.size,
+            "content_type": blob.content_type,
+            "md5_hash": blob.md5_hash,
+            "crc32c": blob.crc32c,
+            "time_created": blob.time_created.isoformat() if blob.time_created else None,
+            "updated": blob.updated.isoformat() if blob.updated else None,
+            "generation": blob.generation,
+            "metageneration": blob.metageneration,
+            "storage_class": blob.storage_class,
+            "custom_metadata": blob.metadata or {},
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        err_name = type(e).__name__
+        err_msg = str(e)
+        ctx.error(f"Failed to get metadata for {gcs_uri}: {err_name}: {err_msg}")
+        if "Forbidden" in err_name or "403" in err_msg:
+            raise ToolError(f"Access denied to {gcs_uri}.")
+        raise ToolError(f"Failed to get GCS object metadata for {gcs_uri}: {err_name}: {err_msg}")
+
+
+@mcp.tool()
+async def read_gcs_object(
+    gcs_uri: Annotated[str, "GCS URI like gs://bucket/path/to/file"],
+    ctx: Context,
+    max_bytes: Annotated[int, "Maximum bytes to read (cap to prevent context overflow)"] = 100_000,
+    offset: Annotated[int, "Byte offset to start reading from (default 0)"] = 0,
+) -> dict[str, Any]:
+    """Read a portion of a GCS object inline.
+
+    Reads up to max_bytes from a GCS object starting at offset. Designed for
+    inspecting small files or peeking at the start/middle of large files.
+    Use download_gcs_file to fetch a whole file to disk.
+
+    Content handling:
+    - Text content (utf-8 decodable) is returned as a string in 'content'.
+    - Binary content (gzip, BAM, etc.) is base64-encoded in 'content_base64'.
+      The caller can decode locally and process (e.g. gunzip a partial read).
+
+    Cost note: GCS egress charges apply per byte downloaded.
+
+    Args:
+        gcs_uri: GCS URI like gs://bucket/path/to/file
+        max_bytes: Hard cap on bytes read (default 100_000 / 100 KB).
+            Tool will not exceed this regardless of file size.
+        offset: Byte offset to start at (default 0, i.e. file start).
+            Useful for reading the middle of a large file.
+
+    Returns:
+        Dictionary with:
+        - uri: Source URI
+        - size: Full file size in bytes
+        - bytes_read: Actual bytes returned
+        - offset: Offset used
+        - truncated: True if file is larger than offset+max_bytes
+        - encoding: "utf-8" or "base64" depending on content type
+        - content: Text content (only present when encoding="utf-8")
+        - content_base64: Base64-encoded bytes (only present when encoding="base64")
+        - content_type: MIME type from GCS
+    """
+    import base64
+
+    try:
+        bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
+        if not blob_name:
+            raise ToolError(
+                f"URI '{gcs_uri}' refers to a bucket, not an object. Include an object path."
+            )
+        if max_bytes <= 0:
+            raise ToolError(f"max_bytes must be positive, got {max_bytes}")
+        if offset < 0:
+            raise ToolError(f"offset must be non-negative, got {offset}")
+
+        ctx.info(f"Reading {gcs_uri} (offset={offset}, max_bytes={max_bytes})")
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.get_blob(blob_name)
+
+        if blob is None:
+            raise ToolError(f"Object not found: {gcs_uri}")
+
+        size = blob.size or 0
+
+        if offset >= size:
+            return {
+                "uri": gcs_uri,
+                "size": size,
+                "bytes_read": 0,
+                "offset": offset,
+                "truncated": False,
+                "encoding": "utf-8",
+                "content": "",
+                "content_type": blob.content_type,
+            }
+
+        end = offset + max_bytes - 1
+        data = blob.download_as_bytes(start=offset, end=end)
+        bytes_read = len(data)
+        truncated = (offset + bytes_read) < size
+
+        try:
+            text = data.decode("utf-8")
+            return {
+                "uri": gcs_uri,
+                "size": size,
+                "bytes_read": bytes_read,
+                "offset": offset,
+                "truncated": truncated,
+                "encoding": "utf-8",
+                "content": text,
+                "content_type": blob.content_type,
+            }
+        except UnicodeDecodeError:
+            return {
+                "uri": gcs_uri,
+                "size": size,
+                "bytes_read": bytes_read,
+                "offset": offset,
+                "truncated": truncated,
+                "encoding": "base64",
+                "content_base64": base64.b64encode(data).decode("ascii"),
+                "content_type": blob.content_type,
+            }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        err_name = type(e).__name__
+        err_msg = str(e)
+        ctx.error(f"Failed to read {gcs_uri}: {err_name}: {err_msg}")
+        if "Forbidden" in err_name or "403" in err_msg:
+            raise ToolError(f"Access denied to {gcs_uri}.")
+        raise ToolError(f"Failed to read GCS object {gcs_uri}: {err_name}: {err_msg}")
+
+
+@mcp.tool()
+async def download_gcs_file(
+    gcs_uri: Annotated[str, "Source gs:// URI like gs://bucket/path/to/file"],
+    local_path: Annotated[str, "Absolute local destination path"],
+    ctx: Context,
+    overwrite: Annotated[bool, "Overwrite local file if it exists (default False)"] = False,
+    skip_disk_check: Annotated[
+        bool, "Skip the 90% free-disk-space safety check (default False)"
+    ] = False,
+) -> dict[str, Any]:
+    """Download a complete GCS file to local disk.
+
+    Streams a whole file from GCS to the local filesystem. Suitable for files
+    that won't fit in the context window (BAMs, FASTQs, large VCFs).
+
+    Safety:
+    - Refuses to write if local_path already exists unless overwrite=True.
+    - Refuses to write if download would consume more than 90% of free disk
+      space at the destination, unless skip_disk_check=True.
+    - Verifies downloaded size matches GCS metadata; deletes partial file on
+      mismatch.
+    - Auto-creates parent directories (os.makedirs exist_ok=True).
+
+    Cost note: GCS egress charges apply per byte downloaded. Large files cost
+    real money. Check object metadata first if size is unknown.
+
+    Args:
+        gcs_uri: Source URI like gs://bucket/path/to/file
+        local_path: Absolute destination path. Parent directories created if needed.
+        overwrite: If True, overwrite existing local file. Default False.
+        skip_disk_check: If True, bypass the disk-free safety check. Default False.
+            Use only when you've verified there's enough space.
+
+    Returns:
+        Dictionary with:
+        - source_uri: Source GCS URI
+        - local_path: Final local path
+        - bytes_downloaded: File size on disk
+        - md5_hash: GCS-reported md5
+        - content_type: MIME type from GCS
+    """
+    import os
+    import shutil
+
+    try:
+        bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
+        if not blob_name:
+            raise ToolError(
+                f"URI '{gcs_uri}' refers to a bucket, not an object. Include an object path."
+            )
+
+        if not os.path.isabs(local_path):
+            raise ToolError(f"local_path must be absolute, got '{local_path}'")
+
+        if os.path.exists(local_path) and not overwrite:
+            raise ToolError(
+                f"Local path '{local_path}' already exists. Pass overwrite=True to replace."
+            )
+
+        ctx.info(f"Preparing download {gcs_uri} -> {local_path}")
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.get_blob(blob_name)
+
+        if blob is None:
+            raise ToolError(f"Object not found: {gcs_uri}")
+
+        size = blob.size or 0
+
+        parent = os.path.dirname(local_path)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+            ctx.info(f"Created parent directory {parent}")
+
+        if not skip_disk_check and size > 0:
+            check_dir = parent if parent and os.path.exists(parent) else "/"
+            free = shutil.disk_usage(check_dir).free
+            if size > free * 0.9:
+                raise ToolError(
+                    f"Download would consume more than 90% of free disk space "
+                    f"({size:,} bytes vs {free:,} free at {check_dir}). "
+                    "Free space first or pass skip_disk_check=True to override."
+                )
+
+        ctx.info(f"Downloading {size:,} bytes from {gcs_uri}")
+
+        blob.download_to_filename(local_path)
+
+        actual_size = os.path.getsize(local_path)
+        if size > 0 and actual_size != size:
+            os.remove(local_path)
+            raise ToolError(
+                f"Downloaded size {actual_size} does not match expected {size}. "
+                "Partial file deleted."
+            )
+
+        ctx.info(f"Successfully downloaded {actual_size:,} bytes to {local_path}")
+
+        return {
+            "source_uri": gcs_uri,
+            "local_path": local_path,
+            "bytes_downloaded": actual_size,
+            "md5_hash": blob.md5_hash,
+            "content_type": blob.content_type,
+        }
+
+    except ToolError:
+        raise
+    except Exception as e:
+        err_name = type(e).__name__
+        err_msg = str(e)
+        ctx.error(f"Failed to download {gcs_uri}: {err_name}: {err_msg}")
+        if "Forbidden" in err_name or "403" in err_msg:
+            raise ToolError(f"Access denied to {gcs_uri}.")
+        raise ToolError(f"Failed to download GCS file {gcs_uri}: {err_name}: {err_msg}")
+
+
 # ===== Phase 2: Monitoring Tools =====
 
 
