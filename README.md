@@ -61,6 +61,15 @@ These tools are available in both read-only mode (default) and when write access
 
 - **`get_method_config`** - Get method configuration details including WDL version and input/output mappings
 
+#### GCS Bucket Access (Read-Only)
+
+Read-only inspection of Google Cloud Storage buckets that supply Terra workflow inputs and hold workflow outputs. Uses the same Google Application Default Credentials (ADC) as the FISS API.
+
+- **`list_gcs_objects`** - List objects in a GCS bucket or under a prefix (supports recursive or `ls`-style listing)
+- **`get_gcs_object_metadata`** - Get size, content type, hashes, and timestamps for a GCS object (no content download)
+- **`read_gcs_object`** - Read a portion of a GCS object inline (100 KB default cap, configurable offset, text returned as UTF-8 or binary as base64)
+- **`download_gcs_file`** - Stream a complete GCS file to local disk (with overwrite, disk-free, and size-verification safety checks)
+
 ### Write-Access Tools (Require `--allow-writes` Flag)
 
 ⚠️ **These tools require write access to be enabled.** By default, the server runs in read-only mode for safety. To use these tools, you must start the server with the `--allow-writes` flag (see integration sections below).
