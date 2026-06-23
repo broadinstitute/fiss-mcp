@@ -8,6 +8,7 @@ import argparse
 import json
 import re
 import sys
+import base64
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -16,6 +17,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
 from firecloud import api as fapi
 from google.cloud import batch_v1, storage
+from google.cloud.exceptions import NotFound, Forbidden
 
 # Global flag to control write access (default: read-only mode)
 ALLOW_WRITES = False
@@ -1586,8 +1588,10 @@ async def list_gcs_objects(
         )
 
         objects = []
+        truncated = False
         for blob in iterator:
             if len(objects) >= max_results:
+                truncated = True
                 break
             objects.append(
                 {
@@ -1600,7 +1604,6 @@ async def list_gcs_objects(
             )
 
         prefixes = sorted(iterator.prefixes) if delimiter else []
-        truncated = len(objects) >= max_results
 
         ctx.info(f"Listed {len(objects)} objects, {len(prefixes)} prefixes")
 
@@ -1615,15 +1618,16 @@ async def list_gcs_objects(
 
     except ToolError:
         raise
+    except NotFound:
+        raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
+    except Forbidden:
+        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        ctx.error(f"Failed to list GCS objects: {err_name}: {err_msg}")
-        if "NotFound" in err_name or "404" in err_msg:
-            raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
-        if "Forbidden" in err_name or "403" in err_msg:
-            raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
-        raise ToolError(f"Failed to list GCS objects at {gcs_uri}: {err_name}: {err_msg}")
+        print_msg = f"Failed to list GCS objects: {err_name}: {err_msg}"
+        ctx.error(print_msg)
+        raise ToolError(print_msg)
 
 
 @mcp.tool()
@@ -1690,13 +1694,16 @@ async def get_gcs_object_metadata(
 
     except ToolError:
         raise
+    except NotFound:
+        raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
+    except Forbidden:
+        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        ctx.error(f"Failed to get metadata for {gcs_uri}: {err_name}: {err_msg}")
-        if "Forbidden" in err_name or "403" in err_msg:
-            raise ToolError(f"Access denied to {gcs_uri}.")
-        raise ToolError(f"Failed to get GCS object metadata for {gcs_uri}: {err_name}: {err_msg}")
+        print_msg = f"Failed to get metadata for {gcs_uri}: {err_name}: {err_msg}"
+        ctx.error(print_msg)
+        raise ToolError(print_msg)
 
 
 @mcp.tool()
@@ -1719,6 +1726,10 @@ async def read_gcs_object(
 
     Cost note: GCS egress charges apply per byte downloaded.
 
+    Boundary condition note: a byte-range read can split a multi-byte UTF-8 char at the
+    offset/max_bytes boundary, yielding a UnicodeDecodeError.  This will silently route
+    a text file into binary file handling because of the broken unicode char.
+
     Args:
         gcs_uri: GCS URI like gs://bucket/path/to/file
         max_bytes: Hard cap on bytes read (default 100_000 / 100 KB).
@@ -1738,7 +1749,6 @@ async def read_gcs_object(
         - content_base64: Base64-encoded bytes (only present when encoding="base64")
         - content_type: MIME type from GCS
     """
-    import base64
 
     try:
         bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
@@ -1805,13 +1815,16 @@ async def read_gcs_object(
 
     except ToolError:
         raise
+    except NotFound:
+        raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
+    except Forbidden:
+        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        ctx.error(f"Failed to read {gcs_uri}: {err_name}: {err_msg}")
-        if "Forbidden" in err_name or "403" in err_msg:
-            raise ToolError(f"Access denied to {gcs_uri}.")
-        raise ToolError(f"Failed to read GCS object {gcs_uri}: {err_name}: {err_msg}")
+        print_msg = f"Failed to read GCS object {gcs_uri}: {err_name}: {err_msg}"
+        ctx.error(print_msg)
+        raise ToolError(print_msg)
 
 
 @mcp.tool()
@@ -1923,13 +1936,16 @@ async def download_gcs_file(
 
     except ToolError:
         raise
+    except NotFound:
+        raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
+    except Forbidden:
+        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        ctx.error(f"Failed to download {gcs_uri}: {err_name}: {err_msg}")
-        if "Forbidden" in err_name or "403" in err_msg:
-            raise ToolError(f"Access denied to {gcs_uri}.")
-        raise ToolError(f"Failed to download GCS file {gcs_uri}: {err_name}: {err_msg}")
+        print_msg = f"Failed to download GCS file {gcs_uri}: {err_name}: {err_msg}"
+        ctx.error(print_msg)
+        raise ToolError(print_msg)
 
 
 # ===== Phase 2: Monitoring Tools =====

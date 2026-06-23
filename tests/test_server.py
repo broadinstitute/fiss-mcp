@@ -2010,9 +2010,28 @@ class TestListGcsObjects:
         assert result["truncated"] is False
 
     @pytest.mark.asyncio
-    async def test_list_truncation_detection(self):
-        # Return max_results items - should mark truncated=True
+    async def test_list_truncation_detection_boundary1(self):
+        # Return max_results items - should mark truncated=False
         blobs = [_make_mock_blob(name=f"f{i}.txt") for i in range(5)]
+        mock_iter = MagicMock()
+        mock_iter.__iter__ = lambda self: iter(blobs)
+        mock_iter.prefixes = set()
+
+        mock_client = MagicMock()
+        mock_client.list_blobs.return_value = mock_iter
+
+        ctx = MagicMock()
+
+        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+            result = await terra_server.list_gcs_objects("gs://my-bucket", ctx, max_results=5)
+
+        assert len(result["objects"]) == 5
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_list_truncation_detection_boundary2(self):
+        # Iterator yields max_results+1 items - tool returns max_results and marks truncated=True
+        blobs = [_make_mock_blob(name=f"f{i}.txt") for i in range(6)]
         mock_iter = MagicMock()
         mock_iter.__iter__ = lambda self: iter(blobs)
         mock_iter.prefixes = set()
@@ -2076,9 +2095,10 @@ class TestListGcsObjects:
     @pytest.mark.asyncio
     async def test_list_not_found_maps_to_tool_error(self):
         from fastmcp.exceptions import ToolError
+        from google.cloud.exceptions import NotFound
 
         mock_client = MagicMock()
-        mock_client.list_blobs.side_effect = Exception("404 NotFound: no such bucket")
+        mock_client.list_blobs.side_effect = NotFound("no such bucket")
 
         ctx = MagicMock()
 
@@ -2089,9 +2109,10 @@ class TestListGcsObjects:
     @pytest.mark.asyncio
     async def test_list_forbidden_maps_to_tool_error(self):
         from fastmcp.exceptions import ToolError
+        from google.cloud.exceptions import Forbidden
 
         mock_client = MagicMock()
-        mock_client.list_blobs.side_effect = Exception("403 Forbidden: access denied")
+        mock_client.list_blobs.side_effect = Forbidden("access denied")
 
         ctx = MagicMock()
 
@@ -2156,9 +2177,10 @@ class TestGetGcsObjectMetadata:
     @pytest.mark.asyncio
     async def test_metadata_forbidden(self):
         from fastmcp.exceptions import ToolError
+        from google.cloud.exceptions import Forbidden
 
         mock_bucket = MagicMock()
-        mock_bucket.get_blob.side_effect = Exception("403 Forbidden")
+        mock_bucket.get_blob.side_effect = Forbidden("access denied")
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
@@ -2336,9 +2358,10 @@ class TestReadGcsObject:
     @pytest.mark.asyncio
     async def test_read_forbidden(self):
         from fastmcp.exceptions import ToolError
+        from google.cloud.exceptions import Forbidden
 
         mock_bucket = MagicMock()
-        mock_bucket.get_blob.side_effect = Exception("403 Forbidden")
+        mock_bucket.get_blob.side_effect = Forbidden("access denied")
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
@@ -2583,9 +2606,10 @@ class TestDownloadGcsFile:
     @pytest.mark.asyncio
     async def test_download_forbidden(self, tmp_path):
         from fastmcp.exceptions import ToolError
+        from google.cloud.exceptions import Forbidden
 
         mock_bucket = MagicMock()
-        mock_bucket.get_blob.side_effect = Exception("403 Forbidden")
+        mock_bucket.get_blob.side_effect = Forbidden("access denied")
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
