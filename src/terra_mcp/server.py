@@ -3037,12 +3037,17 @@ async def upload_entities(
     """Upload or update entity data in a Terra workspace data table.
 
     Entities are rows in Terra data tables used as workflow inputs. This tool allows
-    you to add new entities or update existing ones.
+    you to add new entities or update existing ones. Entities are updated one at a
+    time (PATCH per entity), so attribute values can be arbitrary JSON - including
+    entity references and entity-reference lists - not just plain strings/numbers.
 
     Each entity must have:
     - name: Unique identifier for the entity (entity ID)
     - entityType: Type of entity (e.g., 'sample', 'participant', 'sample_set')
-    - attributes: Dictionary of attribute name-value pairs
+    - attributes: Dictionary of attribute name-value pairs. A value may be a plain
+      scalar, a single entity reference ({"entityType": ..., "entityName": ...}),
+      or an entity-reference list
+      ({"itemsType": "EntityReference", "items": [{"entityType": ..., "entityName": ...}, ...]}).
 
     Example entity_data:
     [
@@ -3051,7 +3056,7 @@ async def upload_entities(
             "entityType": "sample",
             "attributes": {
                 "sample_id": "S001",
-                "participant": "P001",
+                "participant": {"entityType": "participant", "entityName": "P001"},
                 "bam_file": "gs://bucket/sample1.bam"
             }
         },
@@ -3060,7 +3065,7 @@ async def upload_entities(
             "entityType": "sample",
             "attributes": {
                 "sample_id": "S002",
-                "participant": "P002",
+                "participant": {"entityType": "participant", "entityName": "P002"},
                 "bam_file": "gs://bucket/sample2.bam"
             }
         }
@@ -3069,6 +3074,8 @@ async def upload_entities(
     Common use cases:
     - Upload sample metadata for workflow execution
     - Update entity attributes with new values
+    - Add entity-reference or entity-reference-list attributes (e.g. linking a
+      participant to a list of pairs)
     - Prepare data tables before workflow submission
 
     Args:
@@ -3110,7 +3117,9 @@ async def upload_entities(
                     "field 'attributes'. Each entity must have 'name', 'entityType', and 'attributes'."
                 )
 
-        # Get entity type from first entity (all should be same type)
+        # Get entity type from first entity, just for logging/the return value -
+        # each entity below is updated using its own entityType, so a mixed-type
+        # entity_data list still works correctly.
         entity_type = entity_data[0]["entityType"]
 
         ctx.info(
@@ -3118,35 +3127,60 @@ async def upload_entities(
             f"to workspace {workspace_namespace}/{workspace_name}"
         )
 
-        response = fapi.upload_entities(
-            workspace_namespace,
-            workspace_name,
-            entity_data,
-        )
+        # fapi.upload_entities() takes a TSV load-file *string*, not a list of
+        # dicts, and can't represent entity-reference attributes without working
+        # out Terra's TSV reference syntax. Update each entity individually via
+        # the PATCH-based fapi.update_entity() instead, which accepts arbitrary
+        # JSON attribute values (including entity references/reference lists)
+        # through Rawls's AddUpdateAttribute op - matching what fapi._attr_set()
+        # builds, per fapi.update_entity()'s own docstring.
+        for entity in entity_data:
+            updates = [
+                {
+                    "op": "AddUpdateAttribute",
+                    "attributeName": attr_name,
+                    "addUpdateAttribute": attr_value,
+                }
+                for attr_name, attr_value in entity["attributes"].items()
+            ]
 
-        if response.status_code == 404:
-            raise ToolError(
-                f"Workspace '{workspace_namespace}/{workspace_name}' not found. "
-                "Please verify the workspace namespace and name are correct."
+            response = fapi.update_entity(
+                workspace_namespace,
+                workspace_name,
+                entity["entityType"],
+                entity["name"],
+                updates,
             )
-        elif response.status_code == 403:
-            raise ToolError(
-                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
-                "You may not have permission to upload entities to this workspace."
-            )
-        elif response.status_code == 400:
-            ctx.error(f"Bad request: {response.text}")
-            raise ToolError(
-                f"Failed to upload entities (HTTP 400). Common issues: "
-                "invalid entity format, duplicate names, or invalid attribute values. "
-                f"Details: {response.text}"
-            )
-        elif response.status_code not in [200, 201]:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
-            raise ToolError(
-                f"Failed to upload entities (HTTP {response.status_code}). "
-                "Please check the entity data format and workspace permissions."
-            )
+
+            if response.status_code == 404:
+                raise ToolError(
+                    f"Entity '{entity['name']}' (type '{entity['entityType']}') or workspace "
+                    f"'{workspace_namespace}/{workspace_name}' not found. "
+                    "Please verify the workspace and entity name are correct."
+                )
+            elif response.status_code == 403:
+                raise ToolError(
+                    f"Access denied updating entity '{entity['name']}' in workspace "
+                    f"'{workspace_namespace}/{workspace_name}'. "
+                    "You may not have permission to upload entities to this workspace."
+                )
+            elif response.status_code == 400:
+                ctx.error(f"Bad request for entity '{entity['name']}': {response.text}")
+                raise ToolError(
+                    f"Failed to upload entity '{entity['name']}' (HTTP 400). Common issues: "
+                    "invalid attribute values or a malformed entity reference. "
+                    f"Details: {response.text}"
+                )
+            elif response.status_code not in [200, 201]:
+                ctx.error(
+                    f"FISS API returned status {response.status_code} for entity "
+                    f"'{entity['name']}': {response.text}"
+                )
+                raise ToolError(
+                    f"Failed to upload entity '{entity['name']}' "
+                    f"(HTTP {response.status_code}). "
+                    "Please check the entity data format and workspace permissions."
+                )
 
         ctx.info(
             f"Successfully uploaded {len(entity_data)} entities of type '{entity_type}' "
