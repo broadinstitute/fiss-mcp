@@ -3040,8 +3040,6 @@ async def upload_entities(
     you to add new entities or update existing ones. Entities are updated one at a
     time (PATCH per entity), so attribute values can be arbitrary JSON - including
     entity references and entity-reference lists - not just plain strings/numbers.
-    If an entity doesn't exist yet, it's created (bare, then the same PATCH sets
-    its attributes) rather than failing.
 
     Each entity must have:
     - name: Unique identifier for the entity (entity ID)
@@ -3153,33 +3151,6 @@ async def upload_entities(
                 entity["name"],
                 updates,
             )
-
-            if response.status_code == 404:
-                # update_entity() is a PATCH - it 404s if the entity doesn't
-                # exist yet rather than creating it. Create a bare entity (no
-                # attributes) via the TSV-based fapi.upload_entities(), then
-                # retry the same PATCH to set its attributes - this handles
-                # create and update uniformly, and still supports entity-
-                # reference/list attribute values since the attribute-setting
-                # step (the PATCH) is unchanged.
-                create_tsv = f"entity:{entity['entityType']}_id\n{entity['name']}\n"
-                create_response = fapi.upload_entities(
-                    workspace_namespace, workspace_name, create_tsv, model="flexible"
-                )
-                if create_response.status_code not in (200, 201):
-                    raise ToolError(
-                        f"Entity '{entity['name']}' (type '{entity['entityType']}') does not "
-                        f"exist in workspace '{workspace_namespace}/{workspace_name}' and "
-                        f"could not be created (HTTP {create_response.status_code}). "
-                        f"Details: {create_response.text}"
-                    )
-                response = fapi.update_entity(
-                    workspace_namespace,
-                    workspace_name,
-                    entity["entityType"],
-                    entity["name"],
-                    updates,
-                )
 
             if response.status_code == 404:
                 raise ToolError(

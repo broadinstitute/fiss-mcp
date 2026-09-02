@@ -3265,102 +3265,12 @@ class TestUploadEntities:
             )
 
     @pytest.mark.asyncio
-    async def test_upload_entities_creates_missing_entity(self, enable_writes):
-        """update_entity() is a PATCH and 404s for an entity that doesn't exist
-        yet - it must be bare-created via upload_entities() and the same PATCH
-        retried, rather than failing outright."""
-        not_found_response = MagicMock()
-        not_found_response.status_code = 404
-        created_response = MagicMock()
-        created_response.status_code = 200
-        patched_response = MagicMock()
-        patched_response.status_code = 200
-
-        entity_data = [
-            {
-                "name": "new_pair_1",
-                "entityType": "pair",
-                "attributes": {"pair_attr": "value"},
-            }
-        ]
-
-        with (
-            patch(
-                "terra_mcp.server.fapi.update_entity",
-                side_effect=[not_found_response, patched_response],
-            ) as mock_update,
-            patch(
-                "terra_mcp.server.fapi.upload_entities", return_value=created_response
-            ) as mock_create,
-        ):
-            upload_entities_fn = terra_server.upload_entities
-            ctx = MagicMock()
-
-            result = await upload_entities_fn(
-                workspace_namespace="test-ns",
-                workspace_name="test-ws",
-                entity_data=entity_data,
-                ctx=ctx,
-            )
-
-            assert result["success"] is True
-
-            # bare-create: just the entity:<type>_id header/row, no attributes
-            mock_create.assert_called_once_with(
-                "test-ns", "test-ws", "entity:pair_id\nnew_pair_1\n", model="flexible"
-            )
-            # the PATCH is retried with the exact same updates after creation
-            assert mock_update.call_count == 2
-            assert mock_update.call_args_list[0].args == mock_update.call_args_list[1].args
-
-    @pytest.mark.asyncio
-    async def test_upload_entities_still_not_found_after_create(self, enable_writes):
-        """If the retried PATCH still 404s even though the bare-create
-        succeeded, surface a clear not-found error instead of looping."""
-        from fastmcp.exceptions import ToolError
-
-        not_found_response = MagicMock()
-        not_found_response.status_code = 404
-        created_response = MagicMock()
-        created_response.status_code = 200
-
-        entity_data = [
-            {"name": "new_pair_1", "entityType": "pair", "attributes": {"pair_attr": "value"}}
-        ]
-
-        with (
-            patch(
-                "terra_mcp.server.fapi.update_entity",
-                return_value=not_found_response,
-            ) as mock_update,
-            patch("terra_mcp.server.fapi.upload_entities", return_value=created_response),
-        ):
-            upload_entities_fn = terra_server.upload_entities
-            ctx = MagicMock()
-
-            with pytest.raises(ToolError) as exc_info:
-                await upload_entities_fn(
-                    workspace_namespace="test-ns",
-                    workspace_name="test-ws",
-                    entity_data=entity_data,
-                    ctx=ctx,
-                )
-
-            assert "not found" in str(exc_info.value)
-            # bare-create was attempted, and the PATCH was retried exactly once
-            assert mock_update.call_count == 2
-
-    @pytest.mark.asyncio
     async def test_upload_entities_workspace_not_found(self, enable_writes):
-        """Test handling of a 404 from update_entity when the fallback create
-        also fails - e.g. because the workspace itself doesn't exist."""
+        """Test handling of a 404 from update_entity"""
         from fastmcp.exceptions import ToolError
 
-        not_found_response = MagicMock()
-        not_found_response.status_code = 404
-        create_fails_response = MagicMock()
-        create_fails_response.status_code = 404
-        create_fails_response.text = "workspace not found"
+        mock_response = MagicMock()
+        mock_response.status_code = 404
 
         entity_data = [
             {
@@ -3370,13 +3280,7 @@ class TestUploadEntities:
             }
         ]
 
-        with (
-            patch("terra_mcp.server.fapi.update_entity", return_value=not_found_response),
-            patch(
-                "terra_mcp.server.fapi.upload_entities",
-                return_value=create_fails_response,
-            ),
-        ):
+        with patch("terra_mcp.server.fapi.update_entity", return_value=mock_response):
             upload_entities_fn = terra_server.upload_entities
 
             ctx = MagicMock()
@@ -3390,8 +3294,7 @@ class TestUploadEntities:
                 )
 
             error_msg = str(exc_info.value)
-            assert "sample_1" in error_msg
-            assert "could not be created" in error_msg
+            assert "not found" in error_msg
 
     @pytest.mark.asyncio
     async def test_upload_entities_access_denied(self, enable_writes):
