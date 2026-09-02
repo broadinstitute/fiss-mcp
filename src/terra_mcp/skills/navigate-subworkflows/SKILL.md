@@ -139,27 +139,34 @@ get_job_metadata(workspace_namespace, workspace_name, submission_id, parent_work
 
 # 2. Extract the subworkflow ID
 get_job_metadata(
-    workspace_namespace, workspace_name, submission_id, parent_workflow_id,
+    workspace_namespace,
+    workspace_name,
+    submission_id,
+    parent_workflow_id,
     mode="extract",
     task_name="SubWorkflowA",
     shard_index=0,
     output_name=None,
-    field_path="subWorkflowId"
+    field_path="subWorkflowId",
 )
 # Returns: subworkflow_id = "abc-123-def"
 
 # 3. Get the subworkflow's summary to find the actual failed task
 get_job_metadata(
-    workspace_namespace, workspace_name, submission_id,
-    workflow_id="abc-123-def"  # Use subworkflow ID
+    workspace_namespace,
+    workspace_name,
+    submission_id,
+    workflow_id="abc-123-def",  # Use subworkflow ID
 )
 # Response shows: "process_data" task within subworkflow failed
 
 # 4. Get logs for the failed task within the subworkflow
 get_workflow_logs(
-    workspace_namespace, workspace_name, submission_id,
+    workspace_namespace,
+    workspace_name,
+    submission_id,
     workflow_id="abc-123-def",
-    fetch_content=True
+    fetch_content=True,
 )
 ```
 
