@@ -3364,6 +3364,35 @@ class TestUploadEntities:
             assert "400" in error_msg
 
     @pytest.mark.asyncio
+    async def test_upload_entities_unexpected_status_code(self, enable_writes):
+        """Test handling of a status code other than 200/201/400/403/404"""
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        entity_data = [
+            {"name": "sample_1", "entityType": "sample", "attributes": {"sample_id": "S001"}}
+        ]
+
+        with patch("terra_mcp.server.fapi.update_entity", return_value=mock_response):
+            upload_entities_fn = terra_server.upload_entities
+            ctx = MagicMock()
+
+            with pytest.raises(ToolError) as exc_info:
+                await upload_entities_fn(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=entity_data,
+                    ctx=ctx,
+                )
+
+            error_msg = str(exc_info.value)
+            assert "sample_1" in error_msg
+            assert "500" in error_msg
+
+    @pytest.mark.asyncio
     async def test_upload_entities_stops_after_first_failing_entity(self, enable_writes):
         """Entities after a failing one must never be attempted - a partial
         failure should not silently continue writing the rest of the batch."""
