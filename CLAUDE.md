@@ -21,7 +21,7 @@ Build an MCP (Model Context Protocol) server that enables Claude and Claude Code
   - `copy_method_config` - Copying workflow configurations
   - `submit_workflow` - Launching new workflows
   - `abort_submission` - Canceling running workflows
-  - `upload_entities` - Uploading/updating entity data
+  - `upload_entities` - Upserting entity data (creates or updates rows)
 - **Enabling Writes**: Use `--allow-writes` command-line flag to enable write operations
 - **Error Messages**: Clear, actionable messages guide users to restart with `--allow-writes` if needed
 - **Testing**: Comprehensive test coverage with `enable_writes` pytest fixture for write tool tests
@@ -121,10 +121,16 @@ All planned tools have been successfully implemented following test-driven devel
     - Cancels all workflows in a submission
 
 ### Data Management (1 tool)
-16. ✅ `upload_entities` - Upload or update entity data in Terra data tables
-    - Validates entity format (name, entityType, attributes)
-    - Supports batch uploads of multiple entities
-    - Comprehensive error handling for invalid data
+16. ✅ `upload_entities` - Upsert entity data in Terra data tables
+    - Creates rows that don't exist yet, updates those that do (attributes not
+      listed are left untouched)
+    - Attribute values may be scalars, entity references, or entity-reference
+      lists (`{"itemsType": "EntityReference", "items": [...]}`)
+    - Supports batch uploads, including mixed `entityType`s in one call
+    - Validates entity format (name, entityType, attributes) and rejects names
+      containing tabs/newlines, which would corrupt the loadfile
+    - Per-entity writes are not atomic: a mid-batch failure names the entities
+      already written
 
 ### GCS Bucket Access (4 tools, read-only)
 17. ✅ `list_gcs_objects` - List objects in a GCS bucket or under a prefix
@@ -191,7 +197,11 @@ All planned tools have been successfully implemented following test-driven devel
 - `fapi.abort_submission(namespace, workspace, submission_id)` - Cancel submission
 
 **Data Management:**
-- `fapi.upload_entities(namespace, workspace, entity_data)` - Upload/update entities
+- `fapi.upload_entities(namespace, workspace, tsv_string, model="flexible")` - Import a TSV
+  loadfile; takes a **string**, not a list of dicts. Used with a one-column
+  `entity:<type>_id` header to create-or-noop rows
+- `fapi.update_entity(namespace, workspace, etype, ename, updates)` - PATCH attributes on an
+  *existing* entity; carries arbitrary JSON, so entity references work
 
 **Google Batch API:**
 - `batch_v1.BatchServiceClient.get_job(name)` - Get Batch job status and events for infrastructure debugging

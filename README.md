@@ -86,7 +86,7 @@ Read-only inspection of Google Cloud Storage buckets that supply Terra workflow 
 
 #### Data Management
 
-- **`upload_entities`** - Upload or update entity data in Terra data tables with validation
+- **`upload_entities`** - Upsert entity data in Terra data tables: creates rows that don't exist yet, updates those that do, and supports entity references and entity-reference lists (e.g. linking a participant to its pairs)
 
 ## Skills (Procedural Workflows)
 
