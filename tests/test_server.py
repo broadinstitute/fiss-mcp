@@ -3070,160 +3070,675 @@ class TestAbortSubmission:
 
 
 class TestUploadEntities:
-    """Test upload_entities tool"""
+    """Test upload_entities tool.
+
+    upload_entities is an upsert built from two FISS calls per batch:
+
+    1. One minimal one-column loadfile per entityType via
+       fapi.upload_entities() with model="flexible" - creates rows that
+       don't exist yet and is a safe no-op for rows that do (delete_empty
+       defaults to False, so existing attributes survive).
+    2. One fapi.update_entity() PATCH per entity to set attributes. PATCH
+       carries arbitrary JSON, so entity references and entity-reference
+       lists are expressible - the TSV path never had that.
+
+    The original bug (#11): entity_data (a list of dicts) was passed
+    straight to fapi.upload_entities(), which takes a TSV load-file
+    *string*. urlencode() stringified the list into a Python repr and
+    Firecloud rejected every call with 400 "Invalid first column header",
+    regardless of payload.
+    """
+
+    @staticmethod
+    def _ok(status_code=200):
+        response = MagicMock()
+        response.status_code = status_code
+        return response
 
     @pytest.mark.asyncio
-    async def test_upload_entities_success(self, enable_writes):
-        """Test successful entity upload"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
+    async def test_upload_entities_precreate_tsv_runs_before_patches(self, enable_writes):
+        """The one-column loadfile must be imported before any PATCH, so a
+        brand-new entity exists by the time its attributes are set."""
+        manager = MagicMock()
 
-        entity_data = [
-            {
-                "name": "sample_1",
-                "entityType": "sample",
-                "attributes": {
-                    "sample_id": "S001",
-                    "participant": "P001",
-                    "tissue_type": "blood",
-                },
-            },
-            {
-                "name": "sample_2",
-                "entityType": "sample",
-                "attributes": {
-                    "sample_id": "S002",
-                    "participant": "P002",
-                    "tissue_type": "tumor",
-                },
-            },
-        ]
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()) as mock_create,
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()) as mock_update,
+        ):
+            manager.attach_mock(mock_create, "create")
+            manager.attach_mock(mock_update, "update")
 
-        with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
-            upload_entities_fn = terra_server.upload_entities
+            entity_data = [
+                {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}},
+                {"name": "sample_2", "entityType": "sample", "attributes": {"a": "2"}},
+            ]
 
-            ctx = MagicMock()
-            result = await upload_entities_fn(
+            await terra_server.upload_entities(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=ctx,
+                ctx=MagicMock(),
+            )
+
+            # header format per firecloud/fiss.py -> u'entity:%s_id' % entity_type
+            mock_create.assert_called_once_with(
+                "test-ns",
+                "test-ws",
+                "entity:sample_id\nsample_1\nsample_2",
+                model="flexible",
+            )
+            # model="flexible" is required, not cosmetic: the default
+            # "firecloud" model only accepts the six built-in entity types.
+            assert mock_create.call_args.kwargs["model"] == "flexible"
+
+            call_order = [name for name, _, _ in manager.mock_calls]
+            assert call_order[0] == "create"
+            assert call_order.count("create") == 1
+            assert call_order.count("update") == 2
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_one_tsv_per_entity_type(self, enable_writes):
+        """A mixed-entityType batch must import one loadfile per type."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()) as mock_create,
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()),
+        ):
+            entity_data = [
+                {"name": "p1", "entityType": "participant", "attributes": {"a": "1"}},
+                {"name": "s1", "entityType": "sample", "attributes": {"a": "2"}},
+                {"name": "p2", "entityType": "participant", "attributes": {"a": "3"}},
+            ]
+
+            await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=entity_data,
+                ctx=MagicMock(),
+            )
+
+            assert mock_create.call_count == 2
+            payloads = {call.args[2] for call in mock_create.call_args_list}
+            assert payloads == {
+                "entity:participant_id\np1\np2",
+                "entity:sample_id\ns1",
+            }
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_never_passes_non_str_to_upload_entities(self, enable_writes):
+        """Regression test for #11: fapi.upload_entities() takes a TSV
+        *string*. Passing entity_data (a list of dicts) is the original bug
+        and must never happen again."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()) as mock_create,
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()),
+        ):
+            entity_data = [
+                {"name": "s1", "entityType": "sample", "attributes": {"a": "1"}},
+                {"name": "p1", "entityType": "participant", "attributes": {"a": "2"}},
+            ]
+
+            await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=entity_data,
+                ctx=MagicMock(),
+            )
+
+            assert mock_create.call_count == 2
+            for call in mock_create.call_args_list:
+                assert isinstance(call.args[2], str), (
+                    f"upload_entities got a {type(call.args[2]).__name__}, not a TSV string"
+                )
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_success_single_entity(self, enable_writes):
+        """A single entity's attributes become one PATCH with one
+        _attr_set-shaped op per attribute."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()) as mock_update,
+        ):
+            entity_data = [
+                {
+                    "name": "sample_1",
+                    "entityType": "sample",
+                    "attributes": {"sample_id": "S001", "tissue_type": "blood"},
+                }
+            ]
+
+            result = await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=entity_data,
+                ctx=MagicMock(),
             )
 
             assert result["success"] is True
-            assert result["entity_count"] == 2
-            assert result["entity_type"] == "sample"
+            assert result["entity_count"] == 1
+
+            mock_update.assert_called_once_with(
+                "test-ns",
+                "test-ws",
+                "sample",
+                "sample_1",
+                [
+                    {
+                        "op": "AddUpdateAttribute",
+                        "attributeName": "sample_id",
+                        "addUpdateAttribute": "S001",
+                    },
+                    {
+                        "op": "AddUpdateAttribute",
+                        "attributeName": "tissue_type",
+                        "addUpdateAttribute": "blood",
+                    },
+                ],
+            )
 
     @pytest.mark.asyncio
-    async def test_upload_entities_workspace_not_found(self, enable_writes):
-        """Test handling of non-existent workspace"""
+    async def test_upload_entities_one_patch_per_entity_in_order(self, enable_writes):
+        """Each entity gets its own PATCH, in order - not one batch call."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()) as mock_update,
+        ):
+            entity_data = [
+                {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}},
+                {"name": "sample_2", "entityType": "sample", "attributes": {"a": "2"}},
+            ]
+
+            result = await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=entity_data,
+                ctx=MagicMock(),
+            )
+
+            assert result["entity_count"] == 2
+            assert mock_update.call_count == 2
+            first, second = mock_update.call_args_list
+            assert first.args[:4] == ("test-ns", "test-ws", "sample", "sample_1")
+            assert second.args[:4] == ("test-ns", "test-ws", "sample", "sample_2")
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_returns_per_type_counts(self, enable_writes):
+        """entity_types must report per-type counts, since mixed-type batches
+        work and a single entity_type field would be misleading."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()),
+        ):
+            entity_data = [
+                {"name": "p1", "entityType": "participant", "attributes": {"a": "1"}},
+                {"name": "p2", "entityType": "participant", "attributes": {"a": "2"}},
+                {"name": "s1", "entityType": "sample", "attributes": {"a": "3"}},
+            ]
+
+            result = await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=entity_data,
+                ctx=MagicMock(),
+            )
+
+            assert result["entity_count"] == 3
+            assert result["entity_types"] == {"participant": 2, "sample": 1}
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_entity_reference_passed_through(self, enable_writes):
+        """A single-entity-reference value must reach the PATCH unchanged.
+
+        This is the real shape Terra uses for reference attributes (confirmed
+        against a live pair table's `participant` attribute)."""
+        reference_value = {"entityType": "participant", "entityName": "17455_0001"}
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()) as mock_update,
+        ):
+            await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=[
+                    {
+                        "name": "17455_0001_BL_TN",
+                        "entityType": "pair",
+                        "attributes": {"participant": reference_value},
+                    }
+                ],
+                ctx=MagicMock(),
+            )
+
+            assert mock_update.call_args.args[4] == [
+                {
+                    "op": "AddUpdateAttribute",
+                    "attributeName": "participant",
+                    "addUpdateAttribute": reference_value,
+                }
+            ]
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_entity_reference_list_passed_through(self, enable_writes):
+        """An entity-reference-*list* value must reach the PATCH unchanged.
+
+        This is the capability the TSV path never had: linking a participant
+        to its list of pairs."""
+        pairs_value = {
+            "itemsType": "EntityReference",
+            "items": [
+                {"entityType": "pair", "entityName": "17455_0001_BL_TN"},
+                {"entityType": "pair", "entityName": "17455_0001_C3_TN"},
+            ],
+        }
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok()) as mock_update,
+        ):
+            await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=[
+                    {
+                        "name": "17455_0001",
+                        "entityType": "participant",
+                        "attributes": {"pairs_": pairs_value},
+                    }
+                ],
+                ctx=MagicMock(),
+            )
+
+            mock_update.assert_called_once_with(
+                "test-ns",
+                "test-ws",
+                "participant",
+                "17455_0001",
+                [
+                    {
+                        "op": "AddUpdateAttribute",
+                        "attributeName": "pairs_",
+                        "addUpdateAttribute": pairs_value,
+                    }
+                ],
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [200, 201, 204])
+    async def test_upload_entities_accepts_success_status_codes(self, enable_writes, status_code):
+        """200, 201 and 204 are all success - Rawls PATCH can answer 204."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok(status_code)),
+            patch("terra_mcp.server.fapi.update_entity", return_value=self._ok(status_code)),
+        ):
+            result = await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=[{"name": "s1", "entityType": "sample", "attributes": {"a": "1"}}],
+                ctx=MagicMock(),
+            )
+
+            assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_precreate_failure_skips_patches(self, enable_writes):
+        """If the loadfile import fails, no PATCH should be attempted."""
         from fastmcp.exceptions import ToolError
 
-        mock_response = MagicMock()
-        mock_response.status_code = 404
+        failed = MagicMock()
+        failed.status_code = 400
+        failed.text = "bad loadfile"
 
-        entity_data = [
-            {
-                "name": "sample_1",
-                "entityType": "sample",
-                "attributes": {"sample_id": "S001"},
-            }
-        ]
-
-        with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
-            upload_entities_fn = terra_server.upload_entities
-
-            ctx = MagicMock()
-
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=failed),
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
             with pytest.raises(ToolError) as exc_info:
-                await upload_entities_fn(
-                    workspace_namespace="nonexistent",
-                    workspace_name="workspace",
-                    entity_data=entity_data,
-                    ctx=ctx,
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[{"name": "s1", "entityType": "sample", "attributes": {"a": "1"}}],
+                    ctx=MagicMock(),
                 )
 
             error_msg = str(exc_info.value)
-            assert "not found" in error_msg
+            assert "sample" in error_msg
+            assert "bad loadfile" in error_msg
+            mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_workspace_not_found(self, enable_writes):
+        """Test handling of a 404 from the PATCH"""
+        from fastmcp.exceptions import ToolError
+
+        not_found = MagicMock()
+        not_found.status_code = 404
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=not_found),
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="nonexistent",
+                    workspace_name="workspace",
+                    entity_data=[
+                        {
+                            "name": "sample_1",
+                            "entityType": "sample",
+                            "attributes": {"sample_id": "S001"},
+                        }
+                    ],
+                    ctx=MagicMock(),
+                )
+
+            assert "not found" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_upload_entities_access_denied(self, enable_writes):
         """Test handling of permission errors"""
         from fastmcp.exceptions import ToolError
 
-        mock_response = MagicMock()
-        mock_response.status_code = 403
+        denied = MagicMock()
+        denied.status_code = 403
 
-        entity_data = [
-            {
-                "name": "sample_1",
-                "entityType": "sample",
-                "attributes": {"sample_id": "S001"},
-            }
-        ]
-
-        with patch("terra_mcp.server.fapi.upload_entities", return_value=mock_response):
-            upload_entities_fn = terra_server.upload_entities
-
-            ctx = MagicMock()
-
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=denied),
+        ):
             with pytest.raises(ToolError) as exc_info:
-                await upload_entities_fn(
+                await terra_server.upload_entities(
                     workspace_namespace="restricted",
                     workspace_name="workspace",
-                    entity_data=entity_data,
-                    ctx=ctx,
+                    entity_data=[
+                        {
+                            "name": "sample_1",
+                            "entityType": "sample",
+                            "attributes": {"sample_id": "S001"},
+                        }
+                    ],
+                    ctx=MagicMock(),
                 )
 
             assert "Access denied" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_bad_request_reports_which_entity(self, enable_writes):
+        """A 400 from the PATCH must say which entity failed."""
+        from fastmcp.exceptions import ToolError
+
+        bad = MagicMock()
+        bad.status_code = 400
+        bad.text = "invalid attribute value"
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=bad),
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[
+                        {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}}
+                    ],
+                    ctx=MagicMock(),
+                )
+
+            error_msg = str(exc_info.value)
+            assert "sample_1" in error_msg
+            assert "400" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_unexpected_status_code(self, enable_writes):
+        """Test handling of a status code other than the known ones"""
+        from fastmcp.exceptions import ToolError
+
+        boom = MagicMock()
+        boom.status_code = 500
+        boom.text = "Internal Server Error"
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=boom),
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[
+                        {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}}
+                    ],
+                    ctx=MagicMock(),
+                )
+
+            error_msg = str(exc_info.value)
+            assert "sample_1" in error_msg
+            assert "500" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_failure_names_already_written_entities(self, enable_writes):
+        """N sequential PATCHes aren't atomic, so a mid-batch failure must name
+        what already landed - otherwise an agent retrying re-applies them."""
+        from fastmcp.exceptions import ToolError
+
+        bad = MagicMock()
+        bad.status_code = 400
+        bad.text = "boom"
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch(
+                "terra_mcp.server.fapi.update_entity",
+                side_effect=[self._ok(), self._ok(), bad],
+            ) as mock_update,
+        ):
+            entity_data = [
+                {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}},
+                {"name": "sample_2", "entityType": "sample", "attributes": {"a": "2"}},
+                {"name": "sample_3", "entityType": "sample", "attributes": {"a": "3"}},
+                {"name": "sample_4", "entityType": "sample", "attributes": {"a": "4"}},
+            ]
+
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=entity_data,
+                    ctx=MagicMock(),
+                )
+
+            error_msg = str(exc_info.value)
+            assert "sample_3" in error_msg
+            # the two that landed must be named
+            assert "sample_1" in error_msg
+            assert "sample_2" in error_msg
+            # and sample_4 must never have been attempted
+            assert mock_update.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_failure_on_first_entity_reports_none_written(
+        self, enable_writes
+    ):
+        """When the very first entity fails, say plainly that nothing landed."""
+        from fastmcp.exceptions import ToolError
+
+        bad = MagicMock()
+        bad.status_code = 400
+        bad.text = "boom"
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()),
+            patch("terra_mcp.server.fapi.update_entity", return_value=bad),
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[
+                        {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}}
+                    ],
+                    ctx=MagicMock(),
+                )
+
+            assert "No entities were written" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_empty_attributes_only_precreates(self, enable_writes):
+        """An entity with no attributes must not send an empty PATCH - Rawls
+        rejects that with "No operations provided" - the loadfile import alone
+        is enough to create the row."""
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=self._ok()) as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            result = await terra_server.upload_entities(
+                workspace_namespace="test-ns",
+                workspace_name="test-ws",
+                entity_data=[{"name": "bare_pair", "entityType": "pair", "attributes": {}}],
+                ctx=MagicMock(),
+            )
+
+            assert result["success"] is True
+            mock_create.assert_called_once_with(
+                "test-ns", "test-ws", "entity:pair_id\nbare_pair", model="flexible"
+            )
+            mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_name", ["with\ttab", "with\nnewline", "with\rcarriage"])
+    async def test_upload_entities_rejects_tsv_breaking_names(self, enable_writes, bad_name):
+        """Names are joined into a multi-row loadfile, so a tab or newline in
+        one would inject extra columns or rows - a newline silently creates
+        unintended extra entities (verified against a live workspace)."""
+        from fastmcp.exceptions import ToolError
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities") as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[
+                        {"name": bad_name, "entityType": "pair", "attributes": {"a": "b"}}
+                    ],
+                    ctx=MagicMock(),
+                )
+
+            assert "not allowed" in str(exc_info.value)
+            # rejected during validation, before touching the API
+            mock_create.assert_not_called()
+            mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "entity",
+        [
+            {"name": "", "entityType": "pair", "attributes": {"a": "b"}},
+            {"name": "   ", "entityType": "pair", "attributes": {"a": "b"}},
+            {"name": "ok", "entityType": "", "attributes": {"a": "b"}},
+            {"name": 123, "entityType": "pair", "attributes": {"a": "b"}},
+        ],
+    )
+    async def test_upload_entities_rejects_blank_or_non_string_ids(self, enable_writes, entity):
+        """Empty/blank/non-string name or entityType must be rejected up front."""
+        from fastmcp.exceptions import ToolError
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities") as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[entity],
+                    ctx=MagicMock(),
+                )
+
+            assert "non-empty string" in str(exc_info.value)
+            mock_create.assert_not_called()
+            mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_entities_rejects_non_dict_attributes(self, enable_writes):
+        """A non-dict 'attributes' must give a clear error, not an
+        AttributeError swallowed by the generic handler."""
+        from fastmcp.exceptions import ToolError
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities") as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[
+                        {"name": "sample_1", "entityType": "sample", "attributes": ["oops"]}
+                    ],
+                    ctx=MagicMock(),
+                )
+
+            error_msg = str(exc_info.value)
+            assert "attributes" in error_msg
+            assert "dictionary" in error_msg
+            mock_create.assert_not_called()
+            mock_update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_upload_entities_empty_data(self, enable_writes):
         """Test handling of empty entity data"""
         from fastmcp.exceptions import ToolError
 
-        upload_entities_fn = terra_server.upload_entities
+        with (
+            patch("terra_mcp.server.fapi.upload_entities") as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[],
+                    ctx=MagicMock(),
+                )
 
-        ctx = MagicMock()
-
-        with pytest.raises(ToolError) as exc_info:
-            await upload_entities_fn(
-                workspace_namespace="test-ns",
-                workspace_name="test-ws",
-                entity_data=[],
-                ctx=ctx,
-            )
-
-        error_msg = str(exc_info.value)
-        assert "cannot be empty" in error_msg
+            assert "cannot be empty" in str(exc_info.value)
+            mock_create.assert_not_called()
+            mock_update.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_upload_entities_invalid_format(self, enable_writes):
-        """Test handling of invalid entity data format"""
+    @pytest.mark.parametrize(
+        "invalid_entity,missing_field",
+        [
+            ({"name": "sample_1", "attributes": {"sample_id": "S001"}}, "entityType"),
+            ({"entityType": "sample", "attributes": {"sample_id": "S001"}}, "name"),
+            ({"name": "sample_1", "entityType": "sample"}, "attributes"),
+        ],
+    )
+    async def test_upload_entities_missing_required_field(
+        self, enable_writes, invalid_entity, missing_field
+    ):
+        """Each of name/entityType/attributes is required, and the error must
+        name which field is missing."""
         from fastmcp.exceptions import ToolError
 
-        # Missing entityType
-        invalid_data = [
-            {
-                "name": "sample_1",
-                "attributes": {"sample_id": "S001"},
-            }
-        ]
+        with (
+            patch("terra_mcp.server.fapi.upload_entities") as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[invalid_entity],
+                    ctx=MagicMock(),
+                )
 
-        upload_entities_fn = terra_server.upload_entities
-
-        ctx = MagicMock()
-
-        with pytest.raises(ToolError) as exc_info:
-            await upload_entities_fn(
-                workspace_namespace="test-ns",
-                workspace_name="test-ws",
-                entity_data=invalid_data,
-                ctx=ctx,
-            )
-
-        error_msg = str(exc_info.value)
-        assert "must have" in error_msg or "entityType" in error_msg
+            assert missing_field in str(exc_info.value)
+            mock_create.assert_not_called()
+            mock_update.assert_not_called()
 
 
 class TestReadOnlyMode:

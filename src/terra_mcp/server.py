@@ -3036,13 +3036,23 @@ async def upload_entities(
 ) -> dict[str, Any]:
     """Upload or update entity data in a Terra workspace data table.
 
-    Entities are rows in Terra data tables used as workflow inputs. This tool allows
-    you to add new entities or update existing ones.
+    Entities are rows in Terra data tables used as workflow inputs. This tool is an
+    upsert: entities that don't exist yet are created, and existing ones have the
+    given attributes added/updated (attributes not listed are left untouched).
+    Attributes are set one entity at a time (PATCH per entity), so values can be
+    arbitrary JSON - including entity references and entity-reference lists - not
+    just plain strings/numbers.
+
+    Mixed entityTypes in one call are supported.
 
     Each entity must have:
-    - name: Unique identifier for the entity (entity ID)
+    - name: Unique identifier for the entity. This IS the table's id column
+      (e.g. sample_id for a sample), so don't also pass it as an attribute.
     - entityType: Type of entity (e.g., 'sample', 'participant', 'sample_set')
-    - attributes: Dictionary of attribute name-value pairs
+    - attributes: Dictionary of attribute name-value pairs. A value may be a plain
+      scalar, a single entity reference ({"entityType": ..., "entityName": ...}),
+      or an entity-reference list
+      ({"itemsType": "EntityReference", "items": [{"entityType": ..., "entityName": ...}, ...]}).
 
     Example entity_data:
     [
@@ -3050,25 +3060,28 @@ async def upload_entities(
             "name": "sample_1",
             "entityType": "sample",
             "attributes": {
-                "sample_id": "S001",
-                "participant": "P001",
+                "participant": {"entityType": "participant", "entityName": "P001"},
                 "bam_file": "gs://bucket/sample1.bam"
             }
         },
         {
-            "name": "sample_2",
-            "entityType": "sample",
+            "name": "P001",
+            "entityType": "participant",
             "attributes": {
-                "sample_id": "S002",
-                "participant": "P002",
-                "bam_file": "gs://bucket/sample2.bam"
+                "samples_": {
+                    "itemsType": "EntityReference",
+                    "items": [{"entityType": "sample", "entityName": "sample_1"}]
+                }
             }
         }
     ]
 
     Common use cases:
     - Upload sample metadata for workflow execution
+    - Create new rows in a data table (including *_set entities)
     - Update entity attributes with new values
+    - Add entity-reference or entity-reference-list attributes (e.g. linking a
+      participant to a list of pairs)
     - Prepare data tables before workflow submission
 
     Args:
@@ -3079,8 +3092,13 @@ async def upload_entities(
     Returns:
         Dictionary containing:
         - success: Whether the upload succeeded
-        - entity_count: Number of entities uploaded
-        - entity_type: The entity type that was uploaded
+        - entity_count: Total number of entities uploaded
+        - entity_types: Mapping of entityType -> number of entities of that type
+
+    Note:
+        The per-entity attribute writes are not atomic. If one entity fails
+        mid-batch, the error names the entities already written so a retry
+        doesn't re-apply them.
     """
     # Check if write operations are allowed
     _check_write_access(ctx)
@@ -3109,55 +3127,148 @@ async def upload_entities(
                     f"Entity at index {i} (name='{entity.get('name')}') is missing required "
                     "field 'attributes'. Each entity must have 'name', 'entityType', and 'attributes'."
                 )
+            if not isinstance(entity["attributes"], dict):
+                raise ToolError(
+                    f"Entity at index {i} (name='{entity.get('name')}') has an invalid "
+                    f"'attributes' field of type {type(entity['attributes']).__name__}. "
+                    "'attributes' must be a dictionary of attribute name-value pairs."
+                )
+            # Names are joined into a multi-row loadfile below, so a tab or a
+            # newline in one would inject extra columns or extra rows - a
+            # newline in particular silently creates unintended entities.
+            for field in ("name", "entityType"):
+                value = entity[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise ToolError(
+                        f"Entity at index {i} has an invalid '{field}': "
+                        f"{value!r}. It must be a non-empty string."
+                    )
+                if any(c in value for c in ("\t", "\n", "\r")):
+                    raise ToolError(
+                        f"Entity at index {i} has an invalid '{field}': {value!r}. "
+                        "Tabs and newlines are not allowed in entity names or types."
+                    )
 
-        # Get entity type from first entity (all should be same type)
-        entity_type = entity_data[0]["entityType"]
+        # Group by entityType, preserving order, for the loadfile step below.
+        names_by_type: dict[str, list[str]] = {}
+        for entity in entity_data:
+            names_by_type.setdefault(entity["entityType"], []).append(entity["name"])
 
         ctx.info(
-            f"Uploading {len(entity_data)} entities of type '{entity_type}' "
+            f"Uploading {len(entity_data)} entities "
+            f"({', '.join(f'{t}={len(n)}' for t, n in names_by_type.items())}) "
             f"to workspace {workspace_namespace}/{workspace_name}"
         )
 
-        response = fapi.upload_entities(
-            workspace_namespace,
-            workspace_name,
-            entity_data,
-        )
+        # Step 1: create-or-noop. fapi.upload_entities() takes a TSV load-file
+        # *string* (passing entity_data straight through was the bug in #11).
+        # Import a minimal one-column loadfile per entityType: that creates
+        # rows that don't exist yet, and is a safe no-op for rows that do,
+        # since delete_empty defaults to False and leaves attributes intact.
+        # model="flexible" is required, not cosmetic - the default "firecloud"
+        # model's _valid_headerline() only accepts the six built-in entity
+        # types, while "flexible" accepts any *_id header.
+        for etype, names in names_by_type.items():
+            create_tsv = f"entity:{etype}_id\n" + "\n".join(names)
+            create_response = fapi.upload_entities(
+                workspace_namespace, workspace_name, create_tsv, model="flexible"
+            )
+            if create_response.status_code not in (200, 201, 204):
+                ctx.error(
+                    f"Loadfile import for entity type '{etype}' returned "
+                    f"{create_response.status_code}: {create_response.text}"
+                )
+                raise ToolError(
+                    f"Failed to create/verify {len(names)} '{etype}' entities "
+                    f"(HTTP {create_response.status_code}). "
+                    f"Details: {create_response.text}"
+                )
 
-        if response.status_code == 404:
-            raise ToolError(
-                f"Workspace '{workspace_namespace}/{workspace_name}' not found. "
-                "Please verify the workspace namespace and name are correct."
+        # Step 2: set attributes. fapi.update_entity() is a PATCH carrying
+        # arbitrary JSON, so entity references and entity-reference lists are
+        # expressible - the TSV path never had that. The op shape matches
+        # fapi._attr_set(). These PATCHes are not atomic across entities, so
+        # track what landed to report it if one fails mid-batch.
+        written: list[str] = []
+
+        def _already_written() -> str:
+            if not written:
+                return "No entities were written."
+            return f"Already written (do not re-apply on retry): {', '.join(written)}."
+
+        for entity in entity_data:
+            updates = [
+                {
+                    "op": "AddUpdateAttribute",
+                    "attributeName": attr_name,
+                    "addUpdateAttribute": attr_value,
+                }
+                for attr_name, attr_value in entity["attributes"].items()
+            ]
+
+            if not updates:
+                # Nothing to set. Rawls rejects an empty PATCH with
+                # "No operations provided", and the loadfile step above
+                # already created the row, so there's nothing left to do.
+                written.append(entity["name"])
+                continue
+
+            response = fapi.update_entity(
+                workspace_namespace,
+                workspace_name,
+                entity["entityType"],
+                entity["name"],
+                updates,
             )
-        elif response.status_code == 403:
-            raise ToolError(
-                f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
-                "You may not have permission to upload entities to this workspace."
-            )
-        elif response.status_code == 400:
-            ctx.error(f"Bad request: {response.text}")
-            raise ToolError(
-                f"Failed to upload entities (HTTP 400). Common issues: "
-                "invalid entity format, duplicate names, or invalid attribute values. "
-                f"Details: {response.text}"
-            )
-        elif response.status_code not in [200, 201]:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
-            raise ToolError(
-                f"Failed to upload entities (HTTP {response.status_code}). "
-                "Please check the entity data format and workspace permissions."
-            )
+
+            if response.status_code == 404:
+                raise ToolError(
+                    f"Entity '{entity['name']}' (type '{entity['entityType']}') or workspace "
+                    f"'{workspace_namespace}/{workspace_name}' not found. "
+                    "Please verify the workspace and entity name are correct. "
+                    f"{_already_written()}"
+                )
+            elif response.status_code == 403:
+                raise ToolError(
+                    f"Access denied updating entity '{entity['name']}' in workspace "
+                    f"'{workspace_namespace}/{workspace_name}'. "
+                    "You may not have permission to upload entities to this workspace. "
+                    f"{_already_written()}"
+                )
+            elif response.status_code == 400:
+                ctx.error(f"Bad request for entity '{entity['name']}': {response.text}")
+                raise ToolError(
+                    f"Failed to upload entity '{entity['name']}' (HTTP 400). Common issues: "
+                    "invalid attribute values or a malformed entity reference. "
+                    f"Details: {response.text} {_already_written()}"
+                )
+            elif response.status_code not in (200, 201, 204):
+                ctx.error(
+                    f"FISS API returned status {response.status_code} for entity "
+                    f"'{entity['name']}': {response.text}"
+                )
+                raise ToolError(
+                    f"Failed to upload entity '{entity['name']}' "
+                    f"(HTTP {response.status_code}). "
+                    "Please check the entity data format and workspace permissions. "
+                    f"{_already_written()}"
+                )
+
+            written.append(entity["name"])
+
+        entity_types = {etype: len(names) for etype, names in names_by_type.items()}
+        type_summary = ", ".join(f"{t}={c}" for t, c in entity_types.items())
 
         ctx.info(
-            f"Successfully uploaded {len(entity_data)} entities of type '{entity_type}' "
+            f"Successfully uploaded {len(entity_data)} entities ({type_summary}) "
             f"to {workspace_namespace}/{workspace_name}"
         )
 
         return {
             "success": True,
             "entity_count": len(entity_data),
-            "entity_type": entity_type,
-            "message": f"Successfully uploaded {len(entity_data)} {entity_type} entities",
+            "entity_types": entity_types,
+            "message": (f"Successfully uploaded {len(entity_data)} entities ({type_summary})"),
         }
 
     except ToolError:
