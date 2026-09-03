@@ -3112,6 +3112,12 @@ async def upload_entities(
 
         # Validate entity format
         for i, entity in enumerate(entity_data):
+            if not isinstance(entity, dict):
+                raise ToolError(
+                    f"Entity at index {i} is not a dictionary (got "
+                    f"{type(entity).__name__}: {entity!r}). Each entity must be a dict "
+                    "with 'name', 'entityType', and 'attributes'."
+                )
             if "name" not in entity:
                 raise ToolError(
                     f"Entity at index {i} is missing required field 'name'. "
@@ -3178,6 +3184,21 @@ async def upload_entities(
                     f"Loadfile import for entity type '{etype}' returned "
                     f"{create_response.status_code}: {create_response.text}"
                 )
+                # This is the first API call the tool makes, so a bad workspace
+                # or a missing write grant surfaces here rather than on the
+                # PATCHes below. Keep those two cases actionable.
+                if create_response.status_code == 404:
+                    raise ToolError(
+                        f"Workspace '{workspace_namespace}/{workspace_name}' not found. "
+                        "Please verify the workspace namespace and name are correct. "
+                        "No entities were created."
+                    )
+                elif create_response.status_code == 403:
+                    raise ToolError(
+                        f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+                        "You may not have permission to create or update entities in this "
+                        "workspace. No entities were created."
+                    )
                 raise ToolError(
                     f"Failed to create/verify {len(names)} '{etype}' entities "
                     f"(HTTP {create_response.status_code}). "
@@ -3192,9 +3213,17 @@ async def upload_entities(
         written: list[str] = []
 
         def _already_written() -> str:
+            # Step 1 created a row for every entity in the batch before any
+            # PATCH ran, so "nothing landed" is never true here - the rows
+            # exist, they just have no attributes yet. Report the two
+            # separately so a retry knows what it is actually looking at.
+            rows = f"All {len(entity_data)} rows were created."
             if not written:
-                return "No entities were written."
-            return f"Already written (do not re-apply on retry): {', '.join(written)}."
+                return f"{rows} No attributes were written yet."
+            return (
+                f"{rows} Attributes already written (do not re-apply on retry): "
+                f"{', '.join(written)}."
+            )
 
         for entity in entity_data:
             updates = [

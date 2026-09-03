@@ -3380,6 +3380,74 @@ class TestUploadEntities:
             assert result["success"] is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status_code,expected",
+        [
+            (404, "verify the workspace namespace and name are correct"),
+            (403, "may not have permission"),
+        ],
+    )
+    async def test_upload_entities_precreate_failure_is_actionable(
+        self, enable_writes, status_code, expected
+    ):
+        """The loadfile import is the FIRST API call, so a typo'd workspace or a
+        missing write grant surfaces there, not on the PATCHes. Those two cases
+        must keep their actionable guidance rather than falling through to the
+        generic "HTTP 404" branch."""
+        from fastmcp.exceptions import ToolError
+
+        failed = MagicMock()
+        failed.status_code = status_code
+        failed.text = "denied"
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities", return_value=failed),
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[{"name": "s1", "entityType": "sample", "attributes": {"a": "1"}}],
+                    ctx=MagicMock(),
+                )
+
+            error_msg = str(exc_info.value)
+            assert expected in error_msg
+            assert "test-ns/test-ws" in error_msg
+            # nothing was created, and no PATCH should follow a failed import
+            assert "No entities were created" in error_msg
+            mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_entity", [123, None, "sample_1", ["sample_1"]])
+    async def test_upload_entities_rejects_non_dict_entity(self, enable_writes, bad_entity):
+        """A non-dict entity must produce a clear validation error rather than
+        falling through to the generic handler. `"name" not in entity` raises
+        TypeError for an int/None, and does a misleading substring check for a
+        str, so the type has to be checked before the field checks."""
+        from fastmcp.exceptions import ToolError
+
+        with (
+            patch("terra_mcp.server.fapi.upload_entities") as mock_create,
+            patch("terra_mcp.server.fapi.update_entity") as mock_update,
+        ):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.upload_entities(
+                    workspace_namespace="test-ns",
+                    workspace_name="test-ws",
+                    entity_data=[bad_entity],
+                    ctx=MagicMock(),
+                )
+
+            error_msg = str(exc_info.value)
+            assert "index 0" in error_msg
+            assert "not a dictionary" in error_msg
+            assert type(bad_entity).__name__ in error_msg
+            mock_create.assert_not_called()
+            mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_upload_entities_precreate_failure_skips_patches(self, enable_writes):
         """If the loadfile import fails, no PATCH should be attempted."""
         from fastmcp.exceptions import ToolError
@@ -3552,14 +3620,19 @@ class TestUploadEntities:
             # the two that landed must be named
             assert "sample_1" in error_msg
             assert "sample_2" in error_msg
-            # and sample_4 must never have been attempted
+            # all four rows exist though - step 1 created them up front
+            assert "All 4 rows were created" in error_msg
+            # and sample_4's attributes must never have been attempted
             assert mock_update.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_upload_entities_failure_on_first_entity_reports_none_written(
+    async def test_upload_entities_failure_on_first_entity_reports_rows_created(
         self, enable_writes
     ):
-        """When the very first entity fails, say plainly that nothing landed."""
+        """When the very first PATCH fails, the rows still exist - step 1
+        created every row in the batch before any PATCH ran. Saying "nothing
+        was written" would tell an agent the table is untouched when it isn't,
+        so rows-created and attributes-written are reported separately."""
         from fastmcp.exceptions import ToolError
 
         bad = MagicMock()
@@ -3580,7 +3653,9 @@ class TestUploadEntities:
                     ctx=MagicMock(),
                 )
 
-            assert "No entities were written" in str(exc_info.value)
+            error_msg = str(exc_info.value)
+            assert "All 1 rows were created" in error_msg
+            assert "No attributes were written yet" in error_msg
 
     @pytest.mark.asyncio
     async def test_upload_entities_empty_attributes_only_precreates(self, enable_writes):

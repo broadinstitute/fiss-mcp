@@ -127,10 +127,13 @@ All planned tools have been successfully implemented following test-driven devel
     - Attribute values may be scalars, entity references, or entity-reference
       lists (`{"itemsType": "EntityReference", "items": [...]}`)
     - Supports batch uploads, including mixed `entityType`s in one call
-    - Validates entity format (name, entityType, attributes) and rejects names
-      containing tabs/newlines, which would corrupt the loadfile
-    - Per-entity writes are not atomic: a mid-batch failure names the entities
-      already written
+    - Validates entity format (must be a dict with name, entityType, attributes)
+      and rejects names containing tabs/newlines, which would corrupt the loadfile
+    - Per-entity writes are not atomic: a mid-batch failure reports rows created
+      and attributes written separately, since the loadfile step creates every
+      row before any attribute PATCH runs
+    - 404/403 on the loadfile step (the first API call) report workspace-not-found
+      and access-denied explicitly, since that is where a bad workspace surfaces
 
 ### GCS Bucket Access (4 tools, read-only)
 17. ✅ `list_gcs_objects` - List objects in a GCS bucket or under a prefix
