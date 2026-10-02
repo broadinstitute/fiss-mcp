@@ -479,6 +479,199 @@ To reconnect after code changes:
 claude mcp reconnect terra
 ```
 
+## Claude Science Integration
+
+Claude Science can run this server as a **Local command** connector
+(Connectors → Add connector → Local command). It works, but Claude Science
+launches local connectors inside a macOS sandbox that is far more restrictive
+than Claude Desktop or Claude Code, so the "clone it anywhere and point at your
+venv" setup from the sections above fails in several ways. This section
+documents what the sandbox does and how to install around it.
+
+**No changes to the server are needed.** Everything below is install-side
+configuration. The one exception is the GCS tools; see
+[Known limitations](#known-limitations).
+
+### What the sandbox does
+
+Observed with Claude Science on macOS (sandbox runtime "Operon" 0.1.55,
+October 2026):
+
+| Restriction | Symptom | Workaround |
+|---|---|---|
+| **Cannot execute binaries under `$HOME`** | `sandbox-exec: execvp() of '~/…/venv/bin/python3' failed: Operation not permitted` | Use a Python installed outside your home (Homebrew: `/opt/homebrew/bin/python3.12`). Conda, pyenv, and venvs under `~` won't launch. |
+| **Cannot read files under `$HOME`** | `can't open file '~/…/server.py': [Errno 1] Operation not permitted` | Keep the repo, venv, and credentials outside `$HOME` (this guide uses `/opt/fiss-mcp`). |
+| **Cannot write anywhere except `/private/tmp` and a per-connector workspace dir** | Log/cache writes fail with `Operation not permitted` | Send logs to `/tmp`. Don't set `TMPDIR` (the sandbox sets its own). |
+| **Minimal environment** | `KeyError: 'PATH'`; credentials not found | Set `HOME`, `PATH`, `GOOGLE_APPLICATION_CREDENTIALS` in the connector's env box. |
+| **No direct network; all traffic through a local proxy with a domain allowlist** | `Tunnel connection failed: 403 Forbidden (host oauth2.googleapis.com not on the allowlist)`; every tool returns "verify your Google credentials" | Add the domains in [Allowed domains](#allowed-domains). |
+| **`storage.googleapis.com` is always blocked** | GCS tools fail even after allowlisting | No workaround yet; see Known limitations. |
+| **Stderr must be redirected** | Server crashes inside `mcp.run()` with a truncated traceback, but runs fine from a terminal | The launcher script redirects stderr to a file. (`FASTMCP_SHOW_CLI_BANNER` had no effect and is not needed.) |
+
+Two further details:
+
+- **FISS requires `gcloud` on `PATH` at import time** (`firecloud/__init__.py`
+  calls `which('gcloud')`). It only checks that the file exists. A gcloud under
+  `~/Development/google-cloud-sdk/bin` passed this check despite the read
+  restriction, so the SDK does not need relocating.
+- **The server process is long-lived.** Claude Science keeps it running across
+  tool calls and conversations, so after changing `run.sh`, the code, or the
+  allowlist you must restart it: `pkill -f terra_mcp/server.py` (the next tool
+  call respawns it), or delete and re-add the connector.
+
+### Installation
+
+`scripts/install-claude-science.sh` performs every step below with progress
+output and ends by printing the exact values to paste into Claude Science:
+
+```bash
+./scripts/install-claude-science.sh                 # read-only mode (recommended)
+./scripts/install-claude-science.sh --allow-writes  # enable write tools
+./scripts/install-claude-science.sh --source .      # install from this checkout instead of cloning
+./scripts/install-claude-science.sh --help          # all options
+```
+
+What it does, if you'd rather do it by hand:
+
+1. **Interpreter outside `$HOME`.** Homebrew Python (`brew install python@3.12` if needed).
+2. **Install tree outside `$HOME`.** Creates `/opt/fiss-mcp` owned by you, containing:
+   - `repo/` — a clone (or copy) of this repository
+   - `venv/` — created from the Homebrew interpreter, with `pip install -e repo`
+   - `adc.json` — a copy of your Google Application Default Credentials (ADC), mode 600
+   - `run.sh` — the launcher the connector calls
+3. **Credentials.** Copies `~/.config/gcloud/application_default_credentials.json`
+   to `/opt/fiss-mcp/adc.json`. This file holds a long-lived refresh token for
+   your Google account — treat it like a password. A service-account key
+   (`--credentials path.json`) is the cleaner option on shared machines.
+4. **Launcher** `/opt/fiss-mcp/run.sh`:
+
+   ```sh
+   #!/bin/sh
+   LOG=/tmp/fiss-mcp-stderr.log
+   echo "=== $(date) ===" >> "$LOG" 2>/dev/null || LOG=/dev/null
+   exec /opt/fiss-mcp/venv/bin/python3 /opt/fiss-mcp/repo/src/terra_mcp/server.py "$@" 2>>"$LOG"
+   ```
+
+5. **Smoke test** from a terminal with the connector's exact environment:
+
+   ```bash
+   env -i HOME=/opt/fiss-mcp \
+     GOOGLE_APPLICATION_CREDENTIALS=/opt/fiss-mcp/adc.json \
+     PATH=/path/to/google-cloud-sdk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin \
+     /opt/fiss-mcp/venv/bin/python3 -c \
+     "from firecloud import api as fapi; print(fapi.list_workspaces().status_code)"   # expect 200
+   ```
+
+   This proves credentials and imports; it does *not* exercise the network
+   allowlist, which only applies inside the sandbox.
+
+### Connector settings
+
+In Claude Science: **Connectors → Add connector → Local command**
+
+| Field | Value |
+|---|---|
+| Name | `terra` |
+| Command | `/opt/fiss-mcp/run.sh` (append ` --allow-writes` for write mode) |
+| Environment variables | see below |
+| Description | `Terra.bio workspaces, data tables, submissions, logs` |
+
+Environment variables (one per line; substitute your gcloud directory):
+
+```
+HOME=/opt/fiss-mcp
+GOOGLE_APPLICATION_CREDENTIALS=/opt/fiss-mcp/adc.json
+GOOGLE_CLOUD_PROJECT=<your-google-project-id>
+PATH=/path/to/google-cloud-sdk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+`GOOGLE_CLOUD_PROJECT` is needed by the GCS client (`storage.Client()`), which
+otherwise fails with `Project was not passed and could not be determined from
+the environment` because the sandbox has no gcloud config to fall back on.
+`HOME=/opt/fiss-mcp` keeps anything the Google client libraries cache out of
+your blocked real home directory. Do **not** set `TMPDIR`.
+
+### Allowed domains
+
+The sandbox refuses all outbound connections except to domains on its
+allowlist. In Claude Science, open the connector's **Allowed domains** setting
+and paste:
+
+```
+oauth2.googleapis.com
+api.firecloud.org
+batch.googleapis.com
+www.googleapis.com
+```
+
+| Domain | Needed by |
+|---|---|
+| `oauth2.googleapis.com` | Token refresh — nothing works without it |
+| `api.firecloud.org` | Terra / FISS API: workspaces, entities, submissions, method configs, outputs, cost |
+| `batch.googleapis.com` | `get_batch_job_status` |
+| `www.googleapis.com` | Some google-auth and client-library calls |
+
+Restart the server after changing the list (`pkill -f terra_mcp/server.py`).
+
+### Known limitations
+
+**GCS tools do not work in Claude Science.** `storage.googleapis.com` is
+permanently blocked by Claude Science; its UI suggests allowlisting the bucket's
+own hostname (`my-bucket.storage.googleapis.com`) instead. That works for the
+GCS XML API, but the `google-cloud-storage` Python client this server uses
+speaks only to the JSON API at `storage.googleapis.com`, so adding per-bucket
+domains does not help. Affected tools: `list_gcs_objects`,
+`get_gcs_object_metadata`, `read_gcs_object`, `download_gcs_file`, and
+`get_workflow_logs` with `fetch_content=True` (with `fetch_content=False` it
+still returns the `gs://` log paths). Supporting this would require an XML-API
+code path in the server plus one allowlist entry per workspace bucket
+(`fc-<uuid>.storage.googleapis.com`).
+
+**Server log messages are currently dropped** (all clients, not just Claude
+Science): `ctx.info()` / `ctx.error()` are coroutines under FastMCP ≥ 3 and the
+server calls them without `await`, so the underlying exception behind a
+"verify your Google credentials" error never appears in any log. Until that is
+fixed, use the diagnostic launcher in Troubleshooting.
+
+### Troubleshooting
+
+- **Server stderr:** `tail -n 60 /tmp/fiss-mcp-stderr.log` — each launch appends
+  a timestamped header.
+- **Every tool fails with "verify your Google credentials"** but the terminal
+  smoke test gives 200 → almost certainly the network allowlist. Confirm by
+  running a probe inside the sandbox: temporarily insert this before the `exec`
+  line in `run.sh`, restart the server, and read the log:
+
+  ```sh
+  { echo "--- env ---"; env | sort; echo "--- probe ---"
+    /opt/fiss-mcp/venv/bin/python3 -c 'import traceback
+  try:
+      from firecloud import api as fapi; r = fapi.list_workspaces(); print("terra:", r.status_code)
+  except Exception: traceback.print_exc()'; } >> "$LOG" 2>&1
+  ```
+
+  A `403 Forbidden (host X not on the allowlist)` names the domain to add.
+- **`execvp() … Operation not permitted`:** the command path is under `$HOME`. Move the interpreter.
+- **`can't open file … Operation not permitted`:** the script or a dependency is under `$HOME`. Move it.
+- **`KeyError: 'PATH'`:** the `PATH` line is missing from the environment box.
+- **Changes don't take effect:** the old process is still running. `pkill -f terra_mcp/server.py`.
+- **Credentials expired / 401:** `gcloud auth application-default login`, then re-copy the ADC file (re-running the install script does this).
+
+### Untested alternative
+
+The sandbox environment shows a per-connector workspace directory,
+`~/.claude-science/orgs/<org-id>/workspaces/_mcp-terra/`, that is writable and
+whose `.venv/python` is exempted from the dynamic-library restrictions. That
+suggests Claude Science intends local MCP servers to live *there*, with their
+own `.venv`, which would make the `/opt/fiss-mcp` relocation unnecessary. This
+has not been tested.
+
+### A note on data
+
+Everything in the [Data Privacy and Security Considerations](#data-privacy-and-security-considerations)
+section applies here. The sandbox restricts what the *server* can reach on your
+machine and on the network; it does nothing to restrict what Terra data flows
+into the model's context once a tool returns.
+
 ## Testing
 
 Run the test suite to verify the server implementation:
