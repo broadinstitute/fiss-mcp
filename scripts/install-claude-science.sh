@@ -267,7 +267,8 @@ ${BOLD}${GREEN}Done.${RESET} Now add the connector in Claude Science:
   ${BOLD}Plus one line per bucket you need to read${RESET}, e.g.:
     fc-<workspace-bucket-uuid>.storage.googleapis.com
   (the bucket name is the bucketName field from get_workspace_metadata;
-   *.storage.googleapis.com works too if you prefer a wildcard)
+   wildcards such as *.storage.googleapis.com are rejected, so list each
+   bucket by name)
 
 Notes:
   - Do NOT set TMPDIR.

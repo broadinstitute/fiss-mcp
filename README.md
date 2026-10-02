@@ -647,8 +647,10 @@ A workspace's bucket name is the `bucketName` field returned by
 `get_workspace_metadata`. That single entry covers everything stored in the
 workspace: workflow logs, outputs, and any inputs you uploaded there. Input
 files that live in *other* buckets (reference data, another workspace) each
-need their own entry. `*.storage.googleapis.com` is accepted by Claude Science
-if you would rather not enumerate them.
+need their own entry.
+
+**Wildcards do not work.** `*.storage.googleapis.com` is rejected, so every
+bucket has to be listed by name.
 
 Restart the server after changing the list (`pkill -f terra_mcp/server.py`).
 
