@@ -4,7 +4,7 @@ Basic test suite to verify server initialization, tool registration,
 and error handling with mocked FISS API calls.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -26,6 +26,46 @@ def enable_writes():
 
 class TestServerInitialization:
     """Test basic server setup and configuration"""
+
+    def test_every_ctx_log_call_is_awaited(self):
+        """Context.info/error/warning/debug are coroutines under FastMCP >= 3.
+
+        Calling one without awaiting it drops the log line silently (and emits
+        only a RuntimeWarning), which hid the real cause of tool failures. Walk
+        the AST instead of trusting review: any ctx.* call that is not the
+        direct child of an Await, or that sits in a sync def, is the bug.
+        """
+        import ast
+        import inspect
+
+        import terra_mcp.server
+
+        tree = ast.parse(inspect.getsource(terra_mcp.server))
+
+        awaited = {
+            node.value.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
+        }
+
+        def ctx_calls(root):
+            return [
+                node.lineno
+                for node in ast.walk(root)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "ctx"
+            ]
+
+        assert [line for line in ctx_calls(tree) if line not in awaited] == []
+        in_sync_defs = [
+            (func.name, line)
+            for func in ast.walk(tree)
+            if isinstance(func, ast.FunctionDef)
+            for line in ctx_calls(func)
+        ]
+        assert in_sync_defs == []
 
     def test_server_exists(self):
         """Verify MCP server instance exists"""
@@ -103,7 +143,7 @@ class TestListWorkspaces:
             list_workspaces_fn = terra_server.list_workspaces
 
             # Create mock context
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_workspaces_fn(ctx)
 
             # Verify result structure
@@ -127,7 +167,7 @@ class TestListWorkspaces:
             # Access the underlying function from the FunctionTool wrapper
             list_workspaces_fn = terra_server.list_workspaces
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             # Should raise ToolError with actionable message
             with pytest.raises(ToolError) as exc_info:
@@ -171,7 +211,7 @@ class TestGetWorkspaceMetadata:
         with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workspace_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -217,7 +257,7 @@ class TestGetWorkspaceMetadata:
         with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workspace_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -246,7 +286,7 @@ class TestGetWorkspaceMetadata:
         with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workspace_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -269,7 +309,7 @@ class TestGetWorkspaceMetadata:
         with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workspace_metadata_fn(
@@ -293,7 +333,7 @@ class TestGetWorkspaceMetadata:
         with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workspace_metadata_fn(
@@ -316,7 +356,7 @@ class TestGetWorkspaceMetadata:
         with patch("terra_mcp.server.fapi.get_workspace", return_value=mock_response):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workspace_metadata_fn(
@@ -338,7 +378,7 @@ class TestGetWorkspaceMetadata:
         ):
             get_workspace_metadata_fn = terra_server.get_workspace_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workspace_metadata_fn(
@@ -367,7 +407,7 @@ class TestGetWorkspaceDataTables:
             # Access the underlying function from the FunctionTool wrapper
             get_workspace_data_tables_fn = terra_server.get_workspace_data_tables
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workspace_data_tables_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -393,7 +433,7 @@ class TestGetWorkspaceDataTables:
             # Access the underlying function from the FunctionTool wrapper
             get_workspace_data_tables_fn = terra_server.get_workspace_data_tables
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workspace_data_tables_fn(
@@ -418,7 +458,7 @@ class TestGetWorkspaceDataTables:
             # Access the underlying function from the FunctionTool wrapper
             get_workspace_data_tables_fn = terra_server.get_workspace_data_tables
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workspace_data_tables_fn(
@@ -471,7 +511,7 @@ class TestGetSubmissionStatus:
             # Access the underlying function from the FunctionTool wrapper
             get_submission_status_fn = terra_server.get_submission_status
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_submission_status_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -508,7 +548,7 @@ class TestGetSubmissionStatus:
             # Access the underlying function from the FunctionTool wrapper
             get_submission_status_fn = terra_server.get_submission_status
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_submission_status_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -534,7 +574,7 @@ class TestGetSubmissionStatus:
             # Access the underlying function from the FunctionTool wrapper
             get_submission_status_fn = terra_server.get_submission_status
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_submission_status_fn(
@@ -564,7 +604,7 @@ class TestGetSubmissionStatus:
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             get_submission_status_fn = terra_server.get_submission_status
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             # Test with max_workflows=5
             result = await get_submission_status_fn(
@@ -622,7 +662,7 @@ class TestGetSubmissionStatus:
         with patch("terra_mcp.server.fapi.get_submission", return_value=mock_response):
             get_submission_status_fn = terra_server.get_submission_status
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_submission_status_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -666,7 +706,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_job_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -718,7 +758,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_job_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -767,7 +807,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_job_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -805,7 +845,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_job_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -849,7 +889,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_job_metadata_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -883,7 +923,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             with pytest.raises(ToolError, match="Output 'missing_output' not found"):
                 await get_job_metadata_fn(
                     workspace_namespace="test-ns",
@@ -908,7 +948,7 @@ class TestGetJobMetadata:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_job_metadata_fn = terra_server.get_job_metadata
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             with pytest.raises(ToolError, match='mode="extract" requires either output_name'):
                 await get_job_metadata_fn(
                     workspace_namespace="test-ns",
@@ -957,7 +997,7 @@ class TestGetWorkflowLogs:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_response):
             get_workflow_logs_fn = terra_server.get_workflow_logs
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workflow_logs_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1011,10 +1051,10 @@ class TestGetWorkflowLogs:
         with patch(
             "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response
         ):
-            with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
+            with patch("terra_mcp.gcs.storage.Client", return_value=mock_storage_client):
                 get_workflow_logs_fn = terra_server.get_workflow_logs
 
-                ctx = MagicMock()
+                ctx = AsyncMock()
                 result = await get_workflow_logs_fn(
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
@@ -1068,10 +1108,10 @@ class TestGetWorkflowLogs:
         with patch(
             "terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_metadata_response
         ):
-            with patch("terra_mcp.server.storage.Client", return_value=mock_storage_client):
+            with patch("terra_mcp.gcs.storage.Client", return_value=mock_storage_client):
                 get_workflow_logs_fn = terra_server.get_workflow_logs
 
-                ctx = MagicMock()
+                ctx = AsyncMock()
                 result = await get_workflow_logs_fn(
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
@@ -1121,7 +1161,7 @@ class TestGetWorkflowLogs:
 
             get_workflow_logs_fn = terra_server.get_workflow_logs
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workflow_logs_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1176,7 +1216,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1202,7 +1242,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await list_submissions_fn(
@@ -1226,7 +1266,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await list_submissions_fn(
@@ -1247,7 +1287,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="empty-ws",
@@ -1281,7 +1321,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1319,7 +1359,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1378,7 +1418,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1430,7 +1470,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1482,7 +1522,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1520,7 +1560,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1562,7 +1602,7 @@ class TestListSubmissions:
         with patch("terra_mcp.server.fapi.list_submissions", return_value=mock_response):
             list_submissions_fn = terra_server.list_submissions
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await list_submissions_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1597,7 +1637,7 @@ class TestGetWorkflowOutputs:
         with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
             get_workflow_outputs_fn = terra_server.get_workflow_outputs
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workflow_outputs_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1622,7 +1662,7 @@ class TestGetWorkflowOutputs:
         with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
             get_workflow_outputs_fn = terra_server.get_workflow_outputs
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workflow_outputs_fn(
@@ -1648,7 +1688,7 @@ class TestGetWorkflowOutputs:
         with patch("terra_mcp.server.fapi.get_workflow_outputs", return_value=mock_response):
             get_workflow_outputs_fn = terra_server.get_workflow_outputs
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workflow_outputs_fn(
@@ -1684,7 +1724,7 @@ class TestGetWorkflowCost:
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
             get_workflow_cost_fn = terra_server.get_workflow_cost
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workflow_cost_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1713,7 +1753,7 @@ class TestGetWorkflowCost:
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
             get_workflow_cost_fn = terra_server.get_workflow_cost
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_workflow_cost_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -1736,7 +1776,7 @@ class TestGetWorkflowCost:
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
             get_workflow_cost_fn = terra_server.get_workflow_cost
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workflow_cost_fn(
@@ -1762,7 +1802,7 @@ class TestGetWorkflowCost:
         with patch("terra_mcp.server.fapi.get_workflow_cost", return_value=mock_response):
             get_workflow_cost_fn = terra_server.get_workflow_cost
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_workflow_cost_fn(
@@ -1821,21 +1861,23 @@ class TestTruncationHelper:
 class TestGCSLogFetching:
     """Test GCS log fetching helper"""
 
-    def test_fetch_gcs_log_invalid_url(self):
+    @pytest.mark.asyncio
+    async def test_fetch_gcs_log_invalid_url(self):
         """Test handling of invalid GCS URLs"""
         from terra_mcp.server import _fetch_gcs_log
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
         # Test non-GCS URL
-        result = _fetch_gcs_log("http://example.com/log.txt", ctx)
+        result = await _fetch_gcs_log("http://example.com/log.txt", ctx)
         assert result is None
 
         # Test malformed GCS URL
-        result = _fetch_gcs_log("gs://bucket-only", ctx)
+        result = await _fetch_gcs_log("gs://bucket-only", ctx)
         assert result is None
 
-    def test_fetch_gcs_log_success(self):
+    @pytest.mark.asyncio
+    async def test_fetch_gcs_log_success(self):
         """Test successful GCS log fetch"""
         from unittest.mock import Mock
 
@@ -1848,16 +1890,17 @@ class TestGCSLogFetching:
         mock_client = Mock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
-            result = _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
+            result = await _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
 
             assert result == "Log content here"
             mock_client.bucket.assert_called_once_with("my-bucket")
             mock_bucket.blob.assert_called_once_with("path/to/log.txt")
 
-    def test_fetch_gcs_log_exception(self):
+    @pytest.mark.asyncio
+    async def test_fetch_gcs_log_exception(self):
         """Test handling of GCS fetch exceptions"""
         from unittest.mock import Mock
 
@@ -1866,10 +1909,10 @@ class TestGCSLogFetching:
         mock_client = Mock()
         mock_client.bucket.side_effect = Exception("GCS error")
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
-            result = _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
+            result = await _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
 
             assert result is None
             # Verify error was logged
@@ -1993,9 +2036,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.return_value = mock_iter
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.list_gcs_objects(
                 "gs://my-bucket/prefix/", ctx, max_results=10
             )
@@ -2020,9 +2063,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.return_value = mock_iter
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.list_gcs_objects("gs://my-bucket", ctx, max_results=5)
 
         assert len(result["objects"]) == 5
@@ -2039,9 +2082,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.return_value = mock_iter
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.list_gcs_objects("gs://my-bucket", ctx, max_results=5)
 
         assert len(result["objects"]) == 5
@@ -2057,9 +2100,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.return_value = mock_iter
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.list_gcs_objects("gs://my-bucket", ctx, recursive=False)
 
         # list_blobs was called with delimiter="/"
@@ -2076,9 +2119,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.return_value = mock_iter
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             await terra_server.list_gcs_objects("gs://my-bucket", ctx, recursive=True)
 
         kwargs = mock_client.list_blobs.call_args.kwargs
@@ -2088,7 +2131,7 @@ class TestListGcsObjects:
     async def test_list_malformed_uri_raises(self):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         with pytest.raises(ToolError, match="must start with 'gs://'"):
             await terra_server.list_gcs_objects("http://bucket", ctx)
 
@@ -2100,9 +2143,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.side_effect = NotFound("no such bucket")
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="not found"):
                 await terra_server.list_gcs_objects("gs://no-such-bucket", ctx)
 
@@ -2114,9 +2157,9 @@ class TestListGcsObjects:
         mock_client = MagicMock()
         mock_client.list_blobs.side_effect = Forbidden("access denied")
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="Access denied"):
                 await terra_server.list_gcs_objects("gs://private-bucket", ctx)
 
@@ -2134,12 +2177,13 @@ class TestGetGcsObjectMetadata:
         )
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.get_gcs_object_metadata("gs://my-bucket/path/file.bam", ctx)
 
         assert result["uri"] == "gs://my-bucket/path/file.bam"
@@ -2160,9 +2204,9 @@ class TestGetGcsObjectMetadata:
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="not found"):
                 await terra_server.get_gcs_object_metadata("gs://my-bucket/missing.txt", ctx)
 
@@ -2170,7 +2214,7 @@ class TestGetGcsObjectMetadata:
     async def test_metadata_bucket_only_uri_rejected(self):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         with pytest.raises(ToolError, match="refers to a bucket"):
             await terra_server.get_gcs_object_metadata("gs://my-bucket", ctx)
 
@@ -2184,9 +2228,9 @@ class TestGetGcsObjectMetadata:
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="Access denied"):
                 await terra_server.get_gcs_object_metadata("gs://my-bucket/restricted.txt", ctx)
 
@@ -2195,12 +2239,13 @@ class TestGetGcsObjectMetadata:
         blob = _make_mock_blob(metadata=None)
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.get_gcs_object_metadata("gs://my-bucket/file.txt", ctx)
 
         assert result["custom_metadata"] == {}
@@ -2216,12 +2261,13 @@ class TestReadGcsObject:
         blob.download_as_bytes.return_value = text.encode("utf-8")
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.read_gcs_object("gs://my-bucket/hello.txt", ctx)
 
         assert result["encoding"] == "utf-8"
@@ -2237,12 +2283,13 @@ class TestReadGcsObject:
         blob.download_as_bytes.return_value = data
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.read_gcs_object(
                 "gs://my-bucket/big.txt", ctx, max_bytes=100
             )
@@ -2261,12 +2308,13 @@ class TestReadGcsObject:
         blob.download_as_bytes.return_value = b"middle-bytes"
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.read_gcs_object(
                 "gs://my-bucket/file.txt", ctx, max_bytes=50, offset=200
             )
@@ -2286,12 +2334,13 @@ class TestReadGcsObject:
         blob.download_as_bytes.return_value = raw
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.read_gcs_object("gs://my-bucket/data.gz", ctx)
 
         assert result["encoding"] == "base64"
@@ -2303,12 +2352,13 @@ class TestReadGcsObject:
         blob = _make_mock_blob(size=100)
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.read_gcs_object("gs://my-bucket/small.txt", ctx, offset=500)
 
         assert result["bytes_read"] == 0
@@ -2325,9 +2375,9 @@ class TestReadGcsObject:
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="not found"):
                 await terra_server.read_gcs_object("gs://my-bucket/missing.txt", ctx)
 
@@ -2335,7 +2385,7 @@ class TestReadGcsObject:
     async def test_read_bucket_only_uri_rejected(self):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         with pytest.raises(ToolError, match="refers to a bucket"):
             await terra_server.read_gcs_object("gs://my-bucket", ctx)
 
@@ -2343,7 +2393,7 @@ class TestReadGcsObject:
     async def test_read_negative_max_bytes_rejected(self):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         with pytest.raises(ToolError, match="max_bytes must be positive"):
             await terra_server.read_gcs_object("gs://my-bucket/file.txt", ctx, max_bytes=0)
 
@@ -2351,7 +2401,7 @@ class TestReadGcsObject:
     async def test_read_negative_offset_rejected(self):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         with pytest.raises(ToolError, match="offset must be non-negative"):
             await terra_server.read_gcs_object("gs://my-bucket/file.txt", ctx, offset=-1)
 
@@ -2365,9 +2415,9 @@ class TestReadGcsObject:
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="Access denied"):
                 await terra_server.read_gcs_object("gs://my-bucket/restricted.txt", ctx)
 
@@ -2388,13 +2438,14 @@ class TestDownloadGcsFile:
         blob.download_to_filename.side_effect = fake_download
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = str(tmp_path / "out.bin")
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.download_gcs_file(
                 "gs://my-bucket/path/file.bin", local, ctx
             )
@@ -2411,9 +2462,9 @@ class TestDownloadGcsFile:
         existing = tmp_path / "existing.bin"
         existing.write_bytes(b"original")
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client"):
+        with patch("terra_mcp.gcs.storage.Client"):
             with pytest.raises(ToolError, match="already exists"):
                 await terra_server.download_gcs_file("gs://my-bucket/file.bin", str(existing), ctx)
 
@@ -2435,12 +2486,13 @@ class TestDownloadGcsFile:
         blob.download_to_filename.side_effect = fake_download
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.download_gcs_file(
                 "gs://my-bucket/file.bin",
                 str(existing),
@@ -2464,14 +2516,15 @@ class TestDownloadGcsFile:
         blob.download_to_filename.side_effect = fake_download
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
 
         assert not nested.parent.exists()
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             result = await terra_server.download_gcs_file(
                 "gs://my-bucket/file.bin", str(nested), ctx
             )
@@ -2489,16 +2542,17 @@ class TestDownloadGcsFile:
         blob = _make_mock_blob(size=10**12)  # 1 TB
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
         DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
         small_free = DiskUsage(total=10**10, used=10**9, free=10**9)  # 1 GB free
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = str(tmp_path / "huge.bin")
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with patch("shutil.disk_usage", return_value=small_free):
                 with pytest.raises(ToolError, match="free disk space"):
                     await terra_server.download_gcs_file("gs://my-bucket/huge.bin", local, ctx)
@@ -2521,16 +2575,17 @@ class TestDownloadGcsFile:
         blob.download_to_filename.side_effect = fake_download
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
         DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
         small_free = DiskUsage(total=2000, used=1500, free=500)
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = str(tmp_path / "out.bin")
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with patch("shutil.disk_usage", return_value=small_free):
                 result = await terra_server.download_gcs_file(
                     "gs://my-bucket/file.bin",
@@ -2555,13 +2610,14 @@ class TestDownloadGcsFile:
         blob.download_to_filename.side_effect = fake_download
         mock_bucket = MagicMock()
         mock_bucket.get_blob.return_value = blob
+        mock_bucket.blob.return_value = blob
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = tmp_path / "partial.bin"
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="does not match"):
                 await terra_server.download_gcs_file("gs://my-bucket/file.bin", str(local), ctx)
 
@@ -2572,7 +2628,7 @@ class TestDownloadGcsFile:
     async def test_download_relative_path_rejected(self, tmp_path):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         with pytest.raises(ToolError, match="must be absolute"):
             await terra_server.download_gcs_file(
                 "gs://my-bucket/file.bin", "relative/path.bin", ctx
@@ -2587,10 +2643,10 @@ class TestDownloadGcsFile:
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = str(tmp_path / "out.bin")
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="not found"):
                 await terra_server.download_gcs_file("gs://my-bucket/missing.bin", local, ctx)
 
@@ -2598,7 +2654,7 @@ class TestDownloadGcsFile:
     async def test_download_bucket_only_uri_rejected(self, tmp_path):
         from fastmcp.exceptions import ToolError
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = str(tmp_path / "out.bin")
         with pytest.raises(ToolError, match="refers to a bucket"):
             await terra_server.download_gcs_file("gs://my-bucket", local, ctx)
@@ -2613,10 +2669,10 @@ class TestDownloadGcsFile:
         mock_client = MagicMock()
         mock_client.bucket.return_value = mock_bucket
 
-        ctx = MagicMock()
+        ctx = AsyncMock()
         local = str(tmp_path / "out.bin")
 
-        with patch("terra_mcp.server.storage.Client", return_value=mock_client):
+        with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
             with pytest.raises(ToolError, match="Access denied"):
                 await terra_server.download_gcs_file("gs://my-bucket/restricted.bin", local, ctx)
 
@@ -2656,7 +2712,7 @@ class TestGetEntities:
         with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
             get_entities_fn = terra_server.get_entities
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_entities_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -2681,7 +2737,7 @@ class TestGetEntities:
         with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
             get_entities_fn = terra_server.get_entities
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_entities_fn(
@@ -2704,7 +2760,7 @@ class TestGetEntities:
         with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
             get_entities_fn = terra_server.get_entities
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_entities_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -2745,7 +2801,7 @@ class TestGetMethodConfig:
         with patch("terra_mcp.server.fapi.get_workspace_config", return_value=mock_response):
             get_method_config_fn = terra_server.get_method_config
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await get_method_config_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -2770,7 +2826,7 @@ class TestGetMethodConfig:
         with patch("terra_mcp.server.fapi.get_workspace_config", return_value=mock_response):
             get_method_config_fn = terra_server.get_method_config
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await get_method_config_fn(
@@ -2810,7 +2866,7 @@ class TestUpdateMethodConfig:
         with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
             update_method_config_fn = terra_server.update_method_config
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await update_method_config_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -2833,7 +2889,7 @@ class TestUpdateMethodConfig:
         with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
             update_method_config_fn = terra_server.update_method_config
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await update_method_config_fn(
@@ -2866,7 +2922,7 @@ class TestCopyMethodConfig:
         with patch("terra_mcp.server.fapi.copy_config_from_repo", return_value=mock_response):
             copy_method_config_fn = terra_server.copy_method_config
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await copy_method_config_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -2890,7 +2946,7 @@ class TestCopyMethodConfig:
         with patch("terra_mcp.server.fapi.copy_config_from_repo", return_value=mock_response):
             copy_method_config_fn = terra_server.copy_method_config
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await copy_method_config_fn(
@@ -2924,7 +2980,7 @@ class TestSubmitWorkflow:
         with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
             submit_workflow_fn = terra_server.submit_workflow
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await submit_workflow_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -2949,7 +3005,7 @@ class TestSubmitWorkflow:
         with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
             submit_workflow_fn = terra_server.submit_workflow
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await submit_workflow_fn(
@@ -2978,7 +3034,7 @@ class TestSubmitWorkflow:
         with patch("terra_mcp.server.fapi.create_submission", return_value=mock_response):
             submit_workflow_fn = terra_server.submit_workflow
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await submit_workflow_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -3005,7 +3061,7 @@ class TestAbortSubmission:
         with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
             abort_submission_fn = terra_server.abort_submission
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
             result = await abort_submission_fn(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
@@ -3027,7 +3083,7 @@ class TestAbortSubmission:
         with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
             abort_submission_fn = terra_server.abort_submission
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await abort_submission_fn(
@@ -3052,7 +3108,7 @@ class TestAbortSubmission:
         with patch("terra_mcp.server.fapi.abort_submission", return_value=mock_response):
             abort_submission_fn = terra_server.abort_submission
 
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await abort_submission_fn(
@@ -3117,7 +3173,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             # header format per firecloud/fiss.py -> u'entity:%s_id' % entity_type
@@ -3153,7 +3209,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert mock_create.call_count == 2
@@ -3181,7 +3237,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert mock_create.call_count == 2
@@ -3210,7 +3266,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert result["success"] is True
@@ -3251,7 +3307,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert result["entity_count"] == 2
@@ -3278,7 +3334,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=entity_data,
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert result["entity_count"] == 3
@@ -3306,7 +3362,7 @@ class TestUploadEntities:
                         "attributes": {"participant": reference_value},
                     }
                 ],
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert mock_update.call_args.args[4] == [
@@ -3345,7 +3401,7 @@ class TestUploadEntities:
                         "attributes": {"pairs_": pairs_value},
                     }
                 ],
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             mock_update.assert_called_once_with(
@@ -3374,7 +3430,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=[{"name": "s1", "entityType": "sample", "attributes": {"a": "1"}}],
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert result["success"] is True
@@ -3409,7 +3465,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=[{"name": "s1", "entityType": "sample", "attributes": {"a": "1"}}],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3437,7 +3493,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=[bad_entity],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3465,7 +3521,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=[{"name": "s1", "entityType": "sample", "attributes": {"a": "1"}}],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3496,7 +3552,7 @@ class TestUploadEntities:
                             "attributes": {"sample_id": "S001"},
                         }
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             assert "not found" in str(exc_info.value)
@@ -3524,7 +3580,7 @@ class TestUploadEntities:
                             "attributes": {"sample_id": "S001"},
                         }
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             assert "Access denied" in str(exc_info.value)
@@ -3549,7 +3605,7 @@ class TestUploadEntities:
                     entity_data=[
                         {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}}
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3576,7 +3632,7 @@ class TestUploadEntities:
                     entity_data=[
                         {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}}
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3612,7 +3668,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=entity_data,
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3650,7 +3706,7 @@ class TestUploadEntities:
                     entity_data=[
                         {"name": "sample_1", "entityType": "sample", "attributes": {"a": "1"}}
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3670,7 +3726,7 @@ class TestUploadEntities:
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_data=[{"name": "bare_pair", "entityType": "pair", "attributes": {}}],
-                ctx=MagicMock(),
+                ctx=AsyncMock(),
             )
 
             assert result["success"] is True
@@ -3698,7 +3754,7 @@ class TestUploadEntities:
                     entity_data=[
                         {"name": bad_name, "entityType": "pair", "attributes": {"a": "b"}}
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             assert "not allowed" in str(exc_info.value)
@@ -3729,7 +3785,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=[entity],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             assert "non-empty string" in str(exc_info.value)
@@ -3753,7 +3809,7 @@ class TestUploadEntities:
                     entity_data=[
                         {"name": "sample_1", "entityType": "sample", "attributes": ["oops"]}
                     ],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             error_msg = str(exc_info.value)
@@ -3776,7 +3832,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=[],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             assert "cannot be empty" in str(exc_info.value)
@@ -3808,7 +3864,7 @@ class TestUploadEntities:
                     workspace_namespace="test-ns",
                     workspace_name="test-ws",
                     entity_data=[invalid_entity],
-                    ctx=MagicMock(),
+                    ctx=AsyncMock(),
                 )
 
             assert missing_field in str(exc_info.value)
@@ -3834,7 +3890,7 @@ class TestReadOnlyMode:
             server_module.ALLOW_WRITES = False
 
             update_method_config_fn = terra_server.update_method_config
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await update_method_config_fn(
@@ -3867,7 +3923,7 @@ class TestReadOnlyMode:
             server_module.ALLOW_WRITES = False
 
             copy_method_config_fn = terra_server.copy_method_config
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await copy_method_config_fn(
@@ -3900,7 +3956,7 @@ class TestReadOnlyMode:
             server_module.ALLOW_WRITES = False
 
             submit_workflow_fn = terra_server.submit_workflow
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await submit_workflow_fn(
@@ -3933,7 +3989,7 @@ class TestReadOnlyMode:
             server_module.ALLOW_WRITES = False
 
             abort_submission_fn = terra_server.abort_submission
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await abort_submission_fn(
@@ -3963,7 +4019,7 @@ class TestReadOnlyMode:
             server_module.ALLOW_WRITES = False
 
             upload_entities_fn = terra_server.upload_entities
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             entity_data = [
                 {
@@ -4010,7 +4066,7 @@ class TestReadOnlyMode:
 
             with patch("terra_mcp.server.fapi.update_workspace_config", return_value=mock_response):
                 update_method_config_fn = terra_server.update_method_config
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 result = await update_method_config_fn(
                     workspace_namespace="test-ns",
@@ -4054,7 +4110,7 @@ class TestReadOnlyMode:
 
             with patch("terra_mcp.server.fapi.list_workspaces", return_value=mock_response):
                 list_workspaces_fn = terra_server.list_workspaces
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 result = await list_workspaces_fn(ctx)
 
@@ -4280,7 +4336,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 result = await tool_fn(
                     workspace_namespace="test-ns",
@@ -4346,7 +4402,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 result = await tool_fn(
                     workspace_namespace="test-ns",
@@ -4405,7 +4461,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 result = await tool_fn(
                     workspace_namespace="test-ns",
@@ -4466,7 +4522,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 result = await tool_fn(
                     workspace_namespace="test-ns",
@@ -4491,7 +4547,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             tool_fn = terra_server.get_batch_job_status
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await tool_fn(
@@ -4520,7 +4576,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             tool_fn = terra_server.get_batch_job_status
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await tool_fn(
@@ -4560,7 +4616,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             tool_fn = terra_server.get_batch_job_status
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await tool_fn(
@@ -4596,7 +4652,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 with pytest.raises(ToolError) as exc_info:
                     await tool_fn(
@@ -4631,7 +4687,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 with pytest.raises(ToolError) as exc_info:
                     await tool_fn(
@@ -4686,7 +4742,7 @@ class TestGetBatchJobStatus:
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             with patch("terra_mcp.server._get_batch_client", return_value=mock_batch_client):
                 tool_fn = terra_server.get_batch_job_status
-                ctx = MagicMock()
+                ctx = AsyncMock()
 
                 # Use short name instead of fully qualified
                 result = await tool_fn(
@@ -4721,7 +4777,7 @@ class TestGetBatchJobStatus:
 
         with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=mock_fiss_response):
             tool_fn = terra_server.get_batch_job_status
-            ctx = MagicMock()
+            ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
                 await tool_fn(

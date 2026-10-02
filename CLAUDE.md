@@ -210,11 +210,63 @@ All planned tools have been successfully implemented following test-driven devel
 - `batch_v1.BatchServiceClient.get_job(name)` - Get Batch job status and events for infrastructure debugging
 
 **Google Cloud Storage (read-only):**
+
+All GCS access goes through `src/terra_mcp/gcs.py`, never `storage.Client()`
+directly, because two backends have to be interchangeable (see "Two GCS
+backends" below). The interface is `list_objects`, `stat_object`, `read_range`,
+`read_text`, `download`; both backends return the same dict shapes and raise
+`google.cloud.exceptions.NotFound` / `Forbidden`.
+
+JSON backend (`google-cloud-storage`, default):
 - `storage.Client()` - GCS client using Application Default Credentials
 - `client.list_blobs(bucket, prefix=, max_results=, delimiter=)` - List objects in a bucket/prefix
-- `client.bucket(name).get_blob(blob_name)` - Get a single blob by name (returns None if not found)
+- `client.bucket(name).get_blob(blob_name)` - Stat a blob (returns None if not found)
+- `client.bucket(name).blob(name)` - Blob handle without a metadata round trip
 - `blob.download_as_bytes(start=, end=)` - Download a byte range (inclusive end)
 - `blob.download_to_filename(path)` - Stream a complete blob to local disk
+
+XML backend (`requests`, for sandboxes that block `storage.googleapis.com`):
+- `GET https://{bucket}.storage.googleapis.com/?list-type=2&prefix=&delimiter=&continuation-token=` - List (S3-compatible XML)
+- `HEAD https://{bucket}.storage.googleapis.com/{key}` - Metadata from `x-goog-*` headers
+- `GET ... {key}` with `Range: bytes=a-b` - Byte range read
+- Auth: `google.auth.default(scopes=[devstorage.read_only])` + `creds.refresh()`, `Authorization: Bearer`
+
+### Two GCS backends (`--gcs-backend`)
+
+- **Why**: Claude Science runs local MCP servers in a sandbox that permanently
+  blocks `storage.googleapis.com`, the only host the GCS **JSON** API is served
+  on. Its UI allows a bucket's own hostname
+  (`{bucket}.storage.googleapis.com`), which serves the GCS **XML** API. So
+  `client_options={"api_endpoint": ...}` cannot rescue the stock client; a
+  second code path was required.
+- **`auto` (default)**: try JSON once; on a connection-level failure (proxy
+  refusal, DNS) switch to XML and latch that for the process. A 403/404 *from
+  GCS* means the host is reachable and must not trigger a switch - that
+  distinction lives in `gcs._looks_unreachable`.
+- **Deliberate XML-side gaps**: no `time_created` (not reported), no
+  `content_type` in listings, and listing `md5_hash` comes from the ETag so it
+  is `None` for composite objects. Requester-pays buckets are unsupported in
+  both backends (Terra workspace buckets are not requester-pays).
+- **Project is optional**: `storage.Client()` raises `EnvironmentError: Project
+  was not passed...` with user ADC and no readable gcloud config. Reads never
+  use the project, so `gcs._json_client()` falls back to a placeholder; the XML
+  backend needs no project at all.
+
+### Logging: `ctx.*` must be awaited
+
+`Context.info/debug/warning/error` are coroutines in FastMCP >= 3. Calling one
+without `await` drops the message and only emits a `RuntimeWarning`, which hid
+the real exception behind every "verify your Google credentials" error.
+`tests/test_server.py::TestServerInitialization::test_every_ctx_log_call_is_awaited`
+walks the AST and fails if any `ctx.*` call is unawaited or sits in a sync
+`def`. Helpers that log therefore have to be `async` (`_check_write_access`,
+`_fetch_gcs_log`).
+
+Errors go through `_log_error(ctx, message)`, which both sends the MCP log
+notification and mirrors the message (with traceback, when in an except block)
+to stderr - Claude Science surfaces only stderr. Generic handlers also append
+`Underlying error: {type(e).__name__}: {e}` to their `ToolError` text, since
+masked messages made failures undiagnosable from the client side.
 
 ## Development Notes & Learnings
 
@@ -238,7 +290,8 @@ All planned tools have been successfully implemented following test-driven devel
 - Access underlying function via `.fn` attribute: `mcp._tool_manager._tools["tool_name"].fn`
 - Always import `ToolError` from `fastmcp.exceptions`, not `fastmcp` directly
 - Use `pytest.mark.asyncio` for all async tool tests
-- Mock context object (`ctx = MagicMock()`) for logging verification
+- Mock context object (`ctx = AsyncMock()`) for logging verification - `MagicMock` fails on `await ctx.info(...)` since FastMCP 3 made the log methods coroutines
+- GCS tests patch `terra_mcp.gcs.storage.Client` (the module that now owns the client), not `terra_mcp.server.storage.Client`
 
 ### Git Workflow Best Practices
 - **Never amend pushed commits**: Once a commit has been pushed to a remote branch, do not use `git commit --amend`. This rewrites history and requires force pushing, which can cause issues for collaborators.

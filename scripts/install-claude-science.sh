@@ -16,6 +16,9 @@
 #
 # Options:
 #   --allow-writes         Enable write tools (submit_workflow, upload_entities, ...)
+#
+# The generated launcher passes --gcs-backend xml, since Claude Science blocks
+# storage.googleapis.com and only per-bucket hostnames are reachable.
 #   --source DIR           Install from a local checkout instead of cloning from GitHub
 #   --install-dir DIR      Install location (default: /opt/fiss-mcp; must NOT be under $HOME)
 #   --python PATH          Python interpreter to use (default: autodetect Homebrew python3)
@@ -206,7 +209,7 @@ cat > "$RUN_SH" <<EOF
 # The sandbox can only write to the system temp dir, so stderr goes to /tmp.
 LOG=/tmp/fiss-mcp-stderr.log
 echo "=== \$(date) ===" >> "\$LOG" 2>/dev/null || LOG=/dev/null
-exec $VENV/bin/python3 $REPO_DIR/src/terra_mcp/server.py "\$@"$WRITE_FLAG 2>>"\$LOG"
+exec $VENV/bin/python3 $REPO_DIR/src/terra_mcp/server.py --gcs-backend xml "\$@"$WRITE_FLAG 2>>"\$LOG"
 EOF
 chmod +x "$RUN_SH"
 ok "launcher at $RUN_SH"
@@ -259,10 +262,19 @@ ${BOLD}${GREEN}Done.${RESET} Now add the connector in Claude Science:
     batch.googleapis.com
     www.googleapis.com
 
+  ${BOLD}Plus one line per bucket you need to read${RESET}, e.g.:
+    fc-<workspace-bucket-uuid>.storage.googleapis.com
+  (the bucket name is the bucketName field from get_workspace_metadata;
+   *.storage.googleapis.com works too if you prefer a wildcard)
+
 Notes:
   - Do NOT set TMPDIR.
-  - storage.googleapis.com is always blocked by Claude Science, so the GCS
-    tools and get_workflow_logs(fetch_content=True) will not work there.
+  - storage.googleapis.com itself is always blocked by Claude Science. The
+    launcher therefore passes --gcs-backend xml, which reaches buckets through
+    their own hostnames instead. Without the per-bucket domains above, the GCS
+    tools and get_workflow_logs(fetch_content=True) will fail with
+    "Could not reach fc-....storage.googleapis.com through the sandbox proxy".
+  - download_gcs_file can only write under /tmp in the sandbox.
   - Claude Science keeps the server process alive; after changing anything,
     restart it:  pkill -f terra_mcp/server.py
   - Server logs: tail -n 60 /tmp/fiss-mcp-stderr.log
