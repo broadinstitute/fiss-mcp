@@ -715,7 +715,8 @@ all five GCS-touching tools work in Claude Science once you select it:
 `list_gcs_objects`, `get_gcs_object_metadata`, `read_gcs_object`,
 `download_gcs_file`, and `get_workflow_logs(fetch_content=True)`.
 
-Two things are required:
+This was confirmed working inside the sandbox on 2026-10-02 against a Terra
+workspace bucket. Two things are required:
 
 1. **Select the backend.** `scripts/install-claude-science.sh` already puts
    `--gcs-backend xml` in the generated `run.sh`; if you wrote the launcher by

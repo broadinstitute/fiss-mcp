@@ -1,5 +1,14 @@
 # Handoff: make fiss-mcp work fully under Claude Science
 
+> **Status: implemented.** Both code changes described here landed in `5b9c1ef`
+> (awaited `ctx.*` logging; a GCS XML-API backend selected with
+> `--gcs-backend`), and the GCS path was confirmed working inside the Claude
+> Science sandbox on 2026-10-02. This file is kept as the record of the
+> investigation that produced them, not as outstanding work. Current behaviour
+> is documented in `README.md` under "Claude Science Integration" and in
+> `CLAUDE.md`; the open question at the end of this file, about the
+> per-connector workspace directory, is still open.
+
 Context for a Claude Code session working in `broadinstitute/fiss-mcp`
 (upstream `main` at `a4becf1` as of 2026-10-02). Written after a debugging
 session that got the server running inside Claude Science's sandbox. The
