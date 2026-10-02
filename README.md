@@ -649,8 +649,58 @@ workspace: workflow logs, outputs, and any inputs you uploaded there. Input
 files that live in *other* buckets (reference data, another workspace) each
 need their own entry.
 
-**Wildcards do not work.** `*.storage.googleapis.com` is rejected, so every
-bucket has to be listed by name.
+**Wildcards.** `*.storage.googleapis.com` was rejected when entered in the
+app's **Settings** > **Network** list, so list each bucket by name there.
+Claude Science's documentation does allow wildcards in the two other places a
+domain can come from (the `config.toml` key below and an organization-managed
+list), where a wildcard covers subdomains only and so would not re-enable the
+blocked `storage.googleapis.com` itself. Whether a wildcard is accepted for
+this host in those channels is untested.
+
+#### Adding the domains without the UI
+
+Claude Science reads `~/.claude-science/config.toml` (on Windows,
+`%USERPROFILE%\.claude-science\config.toml`) and its
+`[sandbox.network] allowed_domains` key is **additive** to whatever is in
+**Settings** > **Network**:
+
+```toml
+[sandbox.network]
+allowed_domains = [
+  "oauth2.googleapis.com",
+  "api.firecloud.org",
+  "batch.googleapis.com",
+  "www.googleapis.com",
+  "fc-11111111-2222-3333-4444-555555555555.storage.googleapis.com",
+]
+```
+
+The file is read once at app startup, so **restart Claude Science** after
+editing it. Restarting the connector with `pkill -f terra_mcp/server.py` is not
+enough, since the allowlist is enforced by the app's sandbox rather than by the
+server.
+
+To print the bucket lines for every workspace you can reach, run this with the
+connector's own interpreter:
+
+```bash
+/opt/fiss-mcp/venv/bin/python3 - <<'EOF'
+from firecloud import api as fapi
+
+for ws in fapi.list_workspaces().json():
+    bucket = ws.get("workspace", {}).get("bucketName")
+    if bucket:
+        print(f'  "{bucket}.storage.googleapis.com",')
+EOF
+```
+
+On Team and Enterprise plans an admin can instead set one list for every
+member under **Organization settings** > **Claude Science** > **Manage network
+allowlist** > **Custom domains**, which does document wildcard support and
+holds up to 600 domains. Be aware that turning that switch on replaces every
+member's own list, including anything `config.toml` added, for the whole
+organization. There is no API or MDM policy channel for the allowlist;
+deploying `config.toml` per member is the supported automation route.
 
 Restart the server after changing the list (`pkill -f terra_mcp/server.py`).
 
