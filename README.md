@@ -594,20 +594,27 @@ In Claude Science: **Connectors → Add connector → Local command**
 | Environment variables | see below |
 | Description | `Terra.bio workspaces, data tables, submissions, logs` |
 
+The installer's `run.sh` already passes `--gcs-backend xml`. If your launcher
+predates that flag, either re-run the installer or put the flag in the Command
+field instead: `/opt/fiss-mcp/run.sh --gcs-backend xml`. Passing it in both
+places is harmless, the last one wins.
+
 Environment variables (one per line; substitute your gcloud directory):
 
 ```
 HOME=/opt/fiss-mcp
 GOOGLE_APPLICATION_CREDENTIALS=/opt/fiss-mcp/adc.json
-GOOGLE_CLOUD_PROJECT=<your-google-project-id>
 PATH=/path/to/google-cloud-sdk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-`GOOGLE_CLOUD_PROJECT` is needed by the GCS client (`storage.Client()`), which
-otherwise fails with `Project was not passed and could not be determined from
-the environment` because the sandbox has no gcloud config to fall back on.
 `HOME=/opt/fiss-mcp` keeps anything the Google client libraries cache out of
 your blocked real home directory. Do **not** set `TMPDIR`.
+
+`GOOGLE_CLOUD_PROJECT=<project-id>` is optional and only affects
+`--gcs-backend json`: the XML backend never sends a project, and the JSON
+backend falls back to a placeholder when it cannot determine one. Set it if you
+want GCS quota attributed to a particular project. Do not paste it with a
+literal placeholder value, an invalid project id is worse than none.
 
 ### Allowed domains
 

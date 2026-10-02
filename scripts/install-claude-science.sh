@@ -247,11 +247,13 @@ ${BOLD}${GREEN}Done.${RESET} Now add the connector in Claude Science:
   Command:
     $RUN_SH
 
-  Environment variables (paste all four lines; fill in your project id):
+  Environment variables (paste these three lines):
     HOME=$INSTALL_DIR
     GOOGLE_APPLICATION_CREDENTIALS=$ADC_DEST
-    GOOGLE_CLOUD_PROJECT=<your-google-project-id>
     PATH=$CONNECTOR_PATH
+
+  Optional, and only used by --gcs-backend json:
+    GOOGLE_CLOUD_PROJECT=<a-real-project-id>
 
   Description (optional):
     Terra.bio workspaces, data tables, submissions, logs$([[ $ALLOW_WRITES -eq 1 ]] && echo ' (write-enabled)' || echo ' (read-only)')
