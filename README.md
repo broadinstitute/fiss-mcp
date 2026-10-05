@@ -36,7 +36,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 ## Available Tools
 
-This MCP server provides 16 tools for interacting with Terra.Bio workspaces:
+This MCP server provides 21 tools for interacting with Terra.Bio workspaces:
 
 ### Read-Only Tools (Always Available)
 
@@ -814,7 +814,7 @@ PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 
 The test suite includes 214 tests:
 - Server initialization verification
-- Tool registration checks (all 16 tools)
+- Tool registration checks (all 21 tools)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
 - Error handling scenarios (404s, 403s, 400s, 409s, API failures, GCS errors)

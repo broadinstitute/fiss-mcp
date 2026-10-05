@@ -32,7 +32,7 @@ import logging
 import os
 import urllib.parse
 import xml.etree.ElementTree as ET
-from typing import Any, Literal
+from typing import Any
 
 import google.auth
 import google.auth.transport.requests
@@ -42,7 +42,6 @@ from google.cloud.exceptions import Forbidden, NotFound
 
 logger = logging.getLogger(__name__)
 
-Backend = Literal["auto", "json", "xml"]
 BACKENDS = ("auto", "json", "xml")
 
 # The GCS XML API is S3-compatible and still uses the historical S3 namespace.

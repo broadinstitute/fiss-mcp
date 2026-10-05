@@ -299,6 +299,16 @@ masked messages made failures undiagnosable from the client side.
 - **Use feature branches**: Create a feature branch for each new feature or bug fix. This keeps the main branch clean and makes PRs easier to review.
 - **Commit message format**: Use clear, descriptive commit messages. Include a summary line, optional body, and `Co-Authored-By` trailer when appropriate.
 
+### Running behind a SOCKS proxy (`socksio`)
+
+httpx, which fastmcp uses, builds a transport for **every** proxy present in the
+environment when a client is constructed, so a `socks5h://` value in `ALL_PROXY`
+raises `ImportError: Using SOCKS proxy, but the 'socksio' package is not
+installed` at startup even when all real traffic goes through the plain HTTP
+proxy in `HTTPS_PROXY`. Claude Science's sandbox sets exactly that, so `socksio`
+is a declared dependency. Our own calls are unaffected: `requests` selects the
+explicit `https` proxy, so the GCS XML backend needs no `PySocks`.
+
 ### FISS Installation
 - The `setuptools<80` / `--no-build-isolation` workaround (fiss#192) was removed after firecloud 0.16.39 fixed the upstream issue (fiss#200)
 - Standard `pip install -e ".[dev]"` now works without special steps
@@ -440,7 +450,7 @@ Claude Code (and similar agents) do not currently consume skills served via MCP 
 
 ## Future Enhancements
 
-Potential areas for expansion beyond the current 15 tools:
+Potential areas for expansion beyond the current 21 tools:
 
 ### Workflow Analysis & Optimization
 - Automatic cost optimization suggestions based on resource usage
