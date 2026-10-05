@@ -658,6 +658,15 @@ list), where a wildcard covers subdomains only and so would not re-enable the
 blocked `storage.googleapis.com` itself. Whether a wildcard is accepted for
 this host in those channels is untested.
 
+**You may not have to pre-populate the list.** Claude Science appears to prompt
+for permission the first time a tool reaches a bucket, rather than simply
+failing, which matches its documented default that "members allow a new site
+themselves when Claude asks". Observed with a **public** bucket;
+**not yet verified for a private bucket** such as a Terra workspace bucket,
+where the request also has to carry working credentials. Until that is
+confirmed, treat the per-bucket allowlist entries above as the reliable route
+and the prompt as a convenience.
+
 #### Adding the domains without the UI
 
 Claude Science reads `~/.claude-science/config.toml` (on Windows,
