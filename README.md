@@ -524,6 +524,7 @@ October 2026):
 | **Minimal environment** | `KeyError: 'PATH'`; credentials not found | Set `HOME`, `PATH`, `GOOGLE_APPLICATION_CREDENTIALS` in the connector's env box. |
 | **No direct network; all traffic through a local proxy with a domain allowlist** | `Tunnel connection failed: 403 Forbidden (host oauth2.googleapis.com not on the allowlist)`; every tool returns "verify your Google credentials" | Add the domains in [Allowed domains](#allowed-domains). |
 | **`storage.googleapis.com` is always blocked** | GCS tools fail even after allowlisting it | Run with `--gcs-backend xml` and allowlist each bucket's own hostname; see [GCS inside Claude Science](#gcs-inside-claude-science). |
+| **A SOCKS proxy is in the environment** | `ImportError: Using SOCKS proxy, but the 'socksio' package is not installed` when the server starts | The sandbox sets `ALL_PROXY=socks5h://...`, and httpx builds a transport for every proxy it finds, so `socksio` must be installed. It is a declared dependency as of this version; re-run the installer or `pip install socksio` in the venv. |
 | **Stderr must be redirected** | Server crashes inside `mcp.run()` with a truncated traceback, but runs fine from a terminal | The launcher script redirects stderr to a file. (`FASTMCP_SHOW_CLI_BANNER` had no effect and is not needed.) |
 
 Two further details:
@@ -762,6 +763,7 @@ Remaining differences when the XML backend is in use:
 - **`execvp() … Operation not permitted`:** the command path is under `$HOME`. Move the interpreter.
 - **`can't open file … Operation not permitted`:** the script or a dependency is under `$HOME`. Move it.
 - **`KeyError: 'PATH'`:** the `PATH` line is missing from the environment box.
+- **`ImportError: Using SOCKS proxy, but the 'socksio' package is not installed`:** the sandbox sets `ALL_PROXY` to a `socks5h://` address, and httpx creates a transport for every proxy in the environment when it builds a client, so the package has to be present even though Terra and GCS traffic go through the plain HTTP proxy instead. `/opt/fiss-mcp/venv/bin/pip install socksio`, or re-run the installer, which now gets it as a declared dependency.
 - **Changes don't take effect:** the old process is still running. `pkill -f terra_mcp/server.py`.
 - **A GCS tool reports `Could not reach fc-….storage.googleapis.com through the sandbox proxy`:** that bucket's hostname is not on the allowed-domains list. Add it and restart the server. To confirm from inside the sandbox, insert this probe before the `exec` line in `run.sh`:
 
