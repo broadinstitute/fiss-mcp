@@ -18,6 +18,25 @@ MD5_HEX = "0cc175b9c0f1b6a831c399e269772661"  # md5("a")
 MD5_B64 = "DMF1ucDxtqgxw5niaXcmYQ=="
 
 
+class FakeRaw:
+    """Stand-in for urllib3's raw stream, which the backend reads undecoded."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.decode_content_args = []
+
+    def read(self, decode_content=True):
+        self.decode_content_args.append(decode_content)
+        data = b"".join(self._chunks)
+        self._chunks = []
+        return data
+
+    def stream(self, chunk_size=None, decode_content=True):
+        self.decode_content_args.append(decode_content)
+        chunks, self._chunks = self._chunks, []
+        yield from chunks
+
+
 class FakeResponse:
     """Minimal stand-in for requests.Response."""
 
@@ -26,6 +45,8 @@ class FakeResponse:
         self.content = content
         self.headers = CaseInsensitiveDict(headers or {})
         self._chunks = chunks
+        self.raw = FakeRaw(chunks if chunks is not None else [content])
+        self.closed = False
 
     @property
     def text(self):
@@ -33,6 +54,13 @@ class FakeResponse:
 
     def iter_content(self, chunk_size=None):
         yield from (self._chunks if self._chunks is not None else [self.content])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+        return False
 
 
 class FakeSession:
@@ -443,3 +471,242 @@ class TestParsers:
                 raise RuntimeError("wrapped") from inner
         except RuntimeError as outer:
             assert gcs._looks_unreachable(outer) is True
+
+
+# ===== Hardening from PR review =====
+
+
+class TestBucketValidation:
+    """A bucket name becomes a hostname on the XML backend, so it is untrusted input."""
+
+    @pytest.mark.parametrize(
+        "bucket",
+        [
+            "evil.example?",  # query delimiter: host becomes evil.example
+            "evil.example#",
+            "evil.example/x",
+            "evil.example:8080",
+            "evil.example@attacker",
+            "UPPER-CASE",
+            "sp ace",
+            "ab",  # too short
+            "-leading-hyphen",
+            "trailing-dot.",
+            "",
+        ],
+    )
+    def test_rejects_names_that_could_redirect_the_request(self, bucket):
+        with pytest.raises(ValueError, match="Invalid GCS bucket name"):
+            gcs.validate_bucket(bucket)
+
+    @pytest.mark.parametrize(
+        "bucket",
+        [
+            "fc-11111111-2222-3333-4444-555555555555",
+            "my-bucket",
+            "my.domain.bucket.example.com",
+            "with_underscores",
+            "abc",
+        ],
+    )
+    def test_accepts_real_bucket_names(self, bucket):
+        assert gcs.validate_bucket(bucket) == bucket
+
+    def test_no_token_is_minted_for_a_rejected_bucket(self, monkeypatch):
+        """Validation must happen before the bearer token exists, not after."""
+        minted = []
+        monkeypatch.setattr(gcs, "_xml_token", lambda: minted.append(1) or "tok")
+        monkeypatch.setattr(gcs, "_session", FakeSession())
+        gcs.set_backend("xml")
+        try:
+            with pytest.raises(ValueError, match="Invalid GCS bucket name"):
+                gcs.read_range("evil.example?", "f.txt", 0, None)
+        finally:
+            gcs.set_backend("auto")
+            gcs._session = None
+        assert minted == []
+
+    @pytest.mark.asyncio
+    async def test_parse_gcs_uri_rejects_a_crafted_bucket(self):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp.server import _parse_gcs_uri
+
+        with pytest.raises(ToolError, match="Invalid GCS bucket name"):
+            _parse_gcs_uri("gs://attacker.example?/file.txt")
+
+
+class TestStoredBytesNotDecompressed:
+    """Ranged reads and downloads must move stored bytes, not expanded ones."""
+
+    def test_range_read_consumes_the_undecoded_stream(self, xml):
+        session = xml(FakeResponse(status_code=206, content=b"stored-bytes"))
+
+        data = gcs.read_range("fc-bucket", "f.gz", 0, 11)
+
+        assert data == b"stored-bytes"
+        assert session.queued == []
+        # gzip stays acceptable so GCS does not decompressively transcode,
+        # and the body is read without decoding
+        assert session.calls[0]["headers"]["Accept-Encoding"] == "gzip"
+        assert session.calls[0]["stream"] is True
+
+    def test_download_writes_the_undecoded_stream(self, xml, tmp_path):
+        session = xml(FakeResponse(chunks=[b"ab", b"cd"]))
+        dest = tmp_path / "o.gz"
+
+        gcs.download("fc-bucket", "f.gz", str(dest))
+
+        assert dest.read_bytes() == b"abcd"
+        assert session.calls[0]["headers"]["Accept-Encoding"] == "gzip"
+
+    def test_read_text_still_decodes_for_logs(self, xml):
+        session = xml(FakeResponse(content=b"task failed\n"))
+
+        assert gcs.read_text("fc-bucket", "logs/stderr") == "task failed\n"
+        # not a raw read: a gzip-encoded log should arrive expanded
+        assert session.calls[0].get("stream") is False
+
+
+class TestGenerationPinning:
+    """stat_object reports a generation; the transfer must use that same version."""
+
+    def test_range_read_pins_the_generation(self, xml):
+        session = xml(FakeResponse(status_code=206, content=b"x"))
+
+        gcs.read_range("fc-bucket", "f.txt", 0, 0, 1766)
+
+        assert session.calls[0]["params"] == {"generation": "1766"}
+
+    def test_download_pins_the_generation(self, xml, tmp_path):
+        session = xml(FakeResponse(content=b"x"))
+
+        gcs.download("fc-bucket", "f.txt", str(tmp_path / "f"), 1766)
+
+        assert session.calls[0]["params"] == {"generation": "1766"}
+
+    def test_no_generation_sends_no_parameter(self, xml):
+        session = xml(FakeResponse(status_code=206, content=b"x"))
+
+        gcs.read_range("fc-bucket", "f.txt", 0, 0)
+
+        assert session.calls[0]["params"] is None
+
+    def test_json_backend_pins_the_generation(self, monkeypatch):
+        seen = {}
+
+        class FakeBucket:
+            def blob(self, key, generation=None):
+                seen["generation"] = generation
+                blob = type("B", (), {})()
+                blob.download_as_bytes = lambda **kw: b"x"
+                return blob
+
+        class FakeClient:
+            def bucket(self, name):
+                return FakeBucket()
+
+        monkeypatch.setattr(gcs, "_json_client", FakeClient)
+        gcs.set_backend("json")
+        try:
+            assert gcs.read_range("fc-bucket", "f.txt", 0, 0, 99) == b"x"
+        finally:
+            gcs.set_backend("auto")
+        assert seen["generation"] == 99
+
+
+class TestDownloadIsAtomic:
+    """A failed transfer must not leave anything at the destination."""
+
+    def _info(self, size=100):
+        return {
+            "name": "f.bam",
+            "size": size,
+            "content_type": "application/octet-stream",
+            "md5_hash": "abc==",
+            "crc32c": "def==",
+            "time_created": None,
+            "updated": None,
+            "generation": 7,
+            "metageneration": 1,
+            "storage_class": "STANDARD",
+            "custom_metadata": {},
+        }
+
+    @pytest.mark.asyncio
+    async def test_stream_failure_leaves_no_partial_file(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp import server as terra_server
+
+        def write_some_then_die(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(b"half of it")
+            raise ConnectionError("stream died mid-transfer")
+
+        monkeypatch.setitem(gcs._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs._IMPL["xml"], "download", write_some_then_die)
+        gcs.set_backend("xml")
+        dest = tmp_path / "out.bam"
+        try:
+            with pytest.raises(ToolError, match="stream died"):
+                await terra_server.download_gcs_file("gs://fc-bucket/f.bam", str(dest), AsyncMock())
+        finally:
+            gcs.set_backend("auto")
+
+        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []  # no .partial left behind either
+
+    @pytest.mark.asyncio
+    async def test_short_transfer_leaves_no_partial_file(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp import server as terra_server
+
+        def write_too_few_bytes(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(b"short")
+
+        monkeypatch.setitem(gcs._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs._IMPL["xml"], "download", write_too_few_bytes)
+        gcs.set_backend("xml")
+        dest = tmp_path / "out.bam"
+        try:
+            with pytest.raises(ToolError, match="does not match"):
+                await terra_server.download_gcs_file("gs://fc-bucket/f.bam", str(dest), AsyncMock())
+        finally:
+            gcs.set_backend("auto")
+
+        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_successful_transfer_lands_at_the_destination(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from terra_mcp import server as terra_server
+
+        payload = b"y" * 100
+
+        def write_all(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(payload)
+
+        monkeypatch.setitem(gcs._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs._IMPL["xml"], "download", write_all)
+        gcs.set_backend("xml")
+        dest = tmp_path / "out.bam"
+        try:
+            result = await terra_server.download_gcs_file(
+                "gs://fc-bucket/f.bam", str(dest), AsyncMock()
+            )
+        finally:
+            gcs.set_backend("auto")
+
+        assert dest.read_bytes() == payload
+        assert result["bytes_downloaded"] == 100
+        assert [p.name for p in tmp_path.iterdir()] == ["out.bam"]

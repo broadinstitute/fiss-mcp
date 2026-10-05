@@ -30,6 +30,7 @@ import binascii
 import email.utils
 import logging
 import os
+import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -56,6 +57,14 @@ _CHUNK = 1 << 20
 # user ADC and no readable gcloud config (the sandbox sets HOME elsewhere) there
 # is nothing to infer, so a placeholder goes in. See _json_client().
 _PLACEHOLDER_PROJECT = "terra-mcp-no-project"
+
+# A bucket name becomes a *hostname* on the XML backend, and the request carries
+# a bearer token, so an unvalidated name is a credential-disclosure vector: the
+# bucket "evil.example?" yields https://evil.example?.storage.googleapis.com/...
+# which resolves to evil.example with the token attached. GCS bucket names are
+# 3-222 chars of lowercase letters, digits, dots, hyphens and underscores,
+# starting and ending alphanumeric; anything else is rejected outright.
+_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$")
 
 _requested_backend: str = "auto"
 _active_backend: str | None = None
@@ -102,6 +111,22 @@ _BLOCKED_MARKERS = (
     "nodename nor servname",
     "temporary failure in name resolution",
 )
+
+
+def validate_bucket(bucket: str) -> str:
+    """Return bucket unchanged, or raise ValueError if it is not a legal GCS name.
+
+    Called before the XML backend turns a bucket into a hostname and before any
+    access token is obtained, so a crafted name can never direct an
+    authenticated request at a non-GCS host.
+    """
+    if not isinstance(bucket, str) or not _BUCKET_RE.match(bucket):
+        raise ValueError(
+            f"Invalid GCS bucket name {bucket!r}: expected 3-222 characters of "
+            "lowercase letters, digits, dots, hyphens or underscores, starting and "
+            "ending with a letter or digit."
+        )
+    return bucket
 
 
 def _looks_unreachable(exc: BaseException) -> bool:
@@ -165,9 +190,19 @@ def stat_object(bucket: str, key: str) -> dict[str, Any] | None:
     return _call("stat_object", bucket, key)
 
 
-def read_range(bucket: str, key: str, start: int, end: int | None) -> bytes:
-    """Read bytes [start, end] inclusive. end=None reads to the end of the object."""
-    return _call("read_range", bucket, key, start, end)
+def read_range(
+    bucket: str, key: str, start: int, end: int | None, generation: int | None = None
+) -> bytes:
+    """Read bytes [start, end] inclusive. end=None reads to the end of the object.
+
+    Pass the generation from stat_object() to pin the read to the object version
+    that was measured, so an overwrite between the two calls cannot return bytes
+    that disagree with the reported size and content type.
+
+    Bytes are returned exactly as stored: no decompression is applied, so a
+    range lines up with the object's stored length.
+    """
+    return _call("read_range", bucket, key, start, end, generation)
 
 
 def read_text(bucket: str, key: str) -> str:
@@ -175,9 +210,13 @@ def read_text(bucket: str, key: str) -> str:
     return _call("read_text", bucket, key)
 
 
-def download(bucket: str, key: str, local_path: str) -> None:
-    """Stream a whole object to local_path."""
-    _call("download", bucket, key, local_path)
+def download(bucket: str, key: str, local_path: str, generation: int | None = None) -> None:
+    """Stream a whole object to local_path, exactly as stored (not decompressed).
+
+    Pass the generation from stat_object() to pin the transfer to the version
+    whose size was checked.
+    """
+    _call("download", bucket, key, local_path, generation)
 
 
 # ===== JSON backend (google-cloud-storage) =====
@@ -254,17 +293,20 @@ def _json_stat_object(bucket: str, key: str) -> dict[str, Any] | None:
     }
 
 
-def _json_read_range(bucket: str, key: str, start: int, end: int | None) -> bytes:
-    blob = _json_client().bucket(bucket).blob(key)
-    return blob.download_as_bytes(start=start, end=end)
+def _json_read_range(
+    bucket: str, key: str, start: int, end: int | None, generation: int | None = None
+) -> bytes:
+    blob = _json_client().bucket(bucket).blob(key, generation=generation)
+    return blob.download_as_bytes(start=start, end=end, raw_download=True)
 
 
 def _json_read_text(bucket: str, key: str) -> str:
     return _json_client().bucket(bucket).blob(key).download_as_text()
 
 
-def _json_download(bucket: str, key: str, local_path: str) -> None:
-    _json_client().bucket(bucket).blob(key).download_to_filename(local_path)
+def _json_download(bucket: str, key: str, local_path: str, generation: int | None = None) -> None:
+    blob = _json_client().bucket(bucket).blob(key, generation=generation)
+    blob.download_to_filename(local_path, raw_download=True)
 
 
 # ===== XML backend (per-bucket virtual-hosted hostnames) =====
@@ -286,6 +328,11 @@ def _xml_session() -> requests.Session:
     return _session
 
 
+def _generation_param(generation: int | None) -> dict[str, str] | None:
+    """Query parameters pinning a request to one object generation, if given."""
+    return {"generation": str(generation)} if generation is not None else None
+
+
 def _xml_host(bucket: str) -> str:
     return f"{bucket}.storage.googleapis.com"
 
@@ -299,6 +346,7 @@ def _xml_request(
     headers: dict[str, str] | None = None,
     stream: bool = False,
 ) -> requests.Response:
+    validate_bucket(bucket)
     url = f"https://{_xml_host(bucket)}/{urllib.parse.quote(key, safe='/')}"
     request_headers = {
         "Authorization": f"Bearer {_xml_token()}",
@@ -483,27 +531,47 @@ def _xml_stat_object(bucket: str, key: str) -> dict[str, Any] | None:
     }
 
 
-def _xml_read_range(bucket: str, key: str, start: int, end: int | None) -> bytes:
+def _xml_read_range(
+    bucket: str, key: str, start: int, end: int | None, generation: int | None = None
+) -> bytes:
     headers = {}
     if start or end is not None:
         headers["Range"] = f"bytes={start}-" if end is None else f"bytes={start}-{end}"
-    response = _xml_request("GET", bucket, key, headers=headers or None)
-    if response.status_code == 416:
-        return b""  # range starts past the end of the object
-    _xml_raise_for_status(response, bucket, key)
-    return bytes(response.content)
+    # Keep "gzip" acceptable so GCS serves a gzip-encoded object as stored rather
+    # than decompressively transcoding it (which would ignore the Range), then
+    # read the body undecoded so the bytes match the stored length we measured.
+    headers["Accept-Encoding"] = "gzip"
+    with _xml_request(
+        "GET", bucket, key, headers=headers, params=_generation_param(generation), stream=True
+    ) as response:
+        if response.status_code == 416:
+            return b""  # range starts past the end of the object
+        _xml_raise_for_status(response, bucket, key)
+        return bytes(response.raw.read(decode_content=False))
 
 
 def _xml_read_text(bucket: str, key: str) -> str:
-    return _xml_read_range(bucket, key, 0, None).decode("utf-8", errors="replace")
+    # Unlike read_range this *wants* decoding: a gzip-encoded log should come
+    # back as readable text, so let requests expand the body.
+    response = _xml_checked("GET", bucket, key)
+    return response.content.decode("utf-8", errors="replace")
 
 
-def _xml_download(bucket: str, key: str, local_path: str) -> None:
-    response = _xml_checked("GET", bucket, key, stream=True)
-    with open(local_path, "wb") as handle:
-        for chunk in response.iter_content(chunk_size=_CHUNK):
-            if chunk:
-                handle.write(chunk)
+def _xml_download(bucket: str, key: str, local_path: str, generation: int | None = None) -> None:
+    with _xml_checked(
+        "GET",
+        bucket,
+        key,
+        headers={"Accept-Encoding": "gzip"},
+        params=_generation_param(generation),
+        stream=True,
+    ) as response:
+        with open(local_path, "wb") as handle:
+            # Undecoded, so the bytes on disk match the stored size the caller
+            # checked against. iter_content() would expand a gzip-encoded object.
+            for chunk in response.raw.stream(_CHUNK, decode_content=False):
+                if chunk:
+                    handle.write(chunk)
 
 
 _IMPL: dict[str, dict[str, Any]] = {

@@ -152,7 +152,14 @@ All planned tools have been successfully implemented following test-driven devel
 20. ✅ `download_gcs_file` - Stream a complete GCS file to local disk
     - Safety: refuses to overwrite existing files unless `overwrite=True`
     - Safety: refuses if download would consume >90% of free disk space unless `skip_disk_check=True`
-    - Safety: verifies downloaded size matches GCS metadata, deletes partial file on mismatch
+    - Safety: transfers to a temp file beside the destination and renames it only
+      after the size matches GCS metadata, so a failed or short transfer never
+      leaves a partial file at `local_path`
+    - Both backends move the object's *stored* bytes (`raw_download` / undecoded
+      stream), so a range lines up with the stored length even for an object
+      with `Content-Encoding: gzip`; `get_workflow_logs` still decodes text
+    - Reads and downloads are pinned to the generation reported by the preceding
+      stat, so an overwrite mid-call cannot mix sizes, hashes and bytes
     - Auto-creates parent directories via `os.makedirs(exist_ok=True)`
     - Suitable for files too large for context (BAMs, FASTQs, large VCFs)
 

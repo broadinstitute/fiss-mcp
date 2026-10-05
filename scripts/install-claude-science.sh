@@ -153,7 +153,8 @@ if [[ -n "$SOURCE_DIR" ]]; then
   [[ -f "$SOURCE_DIR/src/terra_mcp/server.py" ]] || die "--source $SOURCE_DIR doesn't look like a fiss-mcp checkout"
   info "copying from $SOURCE_DIR (excluding venvs and caches)"
   mkdir -p "$REPO_DIR"
-  rsync -a --delete --info=progress2 \
+  # --progress, not --info=progress2: macOS ships rsync 2.6.9, which predates --info
+  rsync -a --delete --progress \
     --exclude 'venv' --exclude '.venv' --exclude '__pycache__' --exclude '*.egg-info' \
     "$SOURCE_DIR/" "$REPO_DIR/"
 elif [[ -d "$REPO_DIR/.git" ]]; then
@@ -209,7 +210,7 @@ cat > "$RUN_SH" <<EOF
 # The sandbox can only write to the system temp dir, so stderr goes to /tmp.
 LOG=/tmp/fiss-mcp-stderr.log
 echo "=== \$(date) ===" >> "\$LOG" 2>/dev/null || LOG=/dev/null
-exec $VENV/bin/python3 $REPO_DIR/src/terra_mcp/server.py --gcs-backend xml "\$@"$WRITE_FLAG 2>>"\$LOG"
+exec "$VENV/bin/python3" "$REPO_DIR/src/terra_mcp/server.py" --gcs-backend xml "\$@"$WRITE_FLAG 2>>"\$LOG"
 EOF
 chmod +x "$RUN_SH"
 ok "launcher at $RUN_SH"
@@ -218,10 +219,13 @@ CONNECTOR_PATH="$GCLOUD_DIR:$(brew --prefix)/bin:/usr/local/bin:/usr/bin:/bin"
 
 if [[ $SMOKE_TEST -eq 1 ]]; then
   info "calling Terra list_workspaces with the sandbox-like environment..."
+  # Must not abort the installer: under `set -e` a failed command substitution
+  # would skip the warning branch below and the connector settings at the end.
   STATUS="$(env -i HOME="$INSTALL_DIR" \
       GOOGLE_APPLICATION_CREDENTIALS="$ADC_DEST" \
       PATH="$CONNECTOR_PATH" \
-      "$VENV/bin/python3" -c 'from firecloud import api as fapi; print(fapi.list_workspaces().status_code)' 2>&1 | tail -1)"
+      "$VENV/bin/python3" -c 'from firecloud import api as fapi; print(fapi.list_workspaces().status_code)' 2>&1 | tail -1)" || true
+  [[ -n "$STATUS" ]] || STATUS="(smoke test produced no output)"
   if [[ "$STATUS" == "200" ]]; then
     ok "Terra responded 200 — credentials and PATH are good"
   else

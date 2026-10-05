@@ -2431,7 +2431,7 @@ class TestDownloadGcsFile:
         data = b"x" * 100
         blob = _make_mock_blob(size=len(data), md5="hash==")
 
-        def fake_download(path):
+        def fake_download(path, **kwargs):
             with open(path, "wb") as f:
                 f.write(data)
 
@@ -2479,7 +2479,7 @@ class TestDownloadGcsFile:
         new_data = b"new-content"
         blob = _make_mock_blob(size=len(new_data))
 
-        def fake_download(path):
+        def fake_download(path, **kwargs):
             with open(path, "wb") as f:
                 f.write(new_data)
 
@@ -2509,7 +2509,7 @@ class TestDownloadGcsFile:
         data = b"hello"
         blob = _make_mock_blob(size=len(data))
 
-        def fake_download(path):
+        def fake_download(path, **kwargs):
             with open(path, "wb") as f:
                 f.write(data)
 
@@ -2568,7 +2568,7 @@ class TestDownloadGcsFile:
         data = b"x" * 1000
         blob = _make_mock_blob(size=len(data))
 
-        def fake_download(path):
+        def fake_download(path, **kwargs):
             with open(path, "wb") as f:
                 f.write(data)
 
@@ -2603,7 +2603,7 @@ class TestDownloadGcsFile:
         # Claim 100 bytes but write only 50 -> mismatch
         blob = _make_mock_blob(size=100)
 
-        def fake_download(path):
+        def fake_download(path, **kwargs):
             with open(path, "wb") as f:
                 f.write(b"x" * 50)
 

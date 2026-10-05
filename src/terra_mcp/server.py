@@ -1573,6 +1573,11 @@ def _parse_gcs_uri(uri: str) -> tuple[str, str]:
     if not bucket:
         raise ToolError(f"Invalid GCS URI '{uri}': missing bucket name")
 
+    try:
+        gcs.validate_bucket(bucket)
+    except ValueError as exc:
+        raise ToolError(f"Invalid GCS URI '{uri}': {exc}") from exc
+
     return bucket, blob_name
 
 
@@ -1797,7 +1802,7 @@ async def read_gcs_object(
             }
 
         end = offset + max_bytes - 1
-        data = gcs.read_range(bucket_name, blob_name, offset, end)
+        data = gcs.read_range(bucket_name, blob_name, offset, end, info["generation"])
         bytes_read = len(data)
         truncated = (offset + bytes_read) < size
 
@@ -1861,8 +1866,9 @@ async def download_gcs_file(
     - Refuses to write if local_path already exists unless overwrite=True.
     - Refuses to write if download would consume more than 90% of free disk
       space at the destination, unless skip_disk_check=True.
-    - Verifies downloaded size matches GCS metadata; deletes partial file on
-      mismatch.
+    - Transfers to a temporary file alongside the destination and renames it
+      only after the size is verified against GCS metadata, so a failed or
+      short transfer never leaves a partial file at local_path.
     - Auto-creates parent directories (os.makedirs exist_ok=True).
 
     Cost note: GCS egress charges apply per byte downloaded. Large files cost
@@ -1885,6 +1891,7 @@ async def download_gcs_file(
     """
     import os
     import shutil
+    import tempfile
 
     try:
         bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
@@ -1927,15 +1934,29 @@ async def download_gcs_file(
 
         await ctx.info(f"Downloading {size:,} bytes from {gcs_uri}")
 
-        gcs.download(bucket_name, blob_name, local_path)
+        # Transfer into a sibling temp file and rename on success, so a stream
+        # that dies mid-download cannot leave a truncated file at local_path
+        # (which a later retry would refuse, or overwrite=True would have
+        # already clobbered). Pinned to the generation whose size was checked.
+        handle, temp_path = tempfile.mkstemp(
+            dir=parent or None, prefix=f".{os.path.basename(local_path)}.", suffix=".partial"
+        )
+        os.close(handle)
+        try:
+            gcs.download(bucket_name, blob_name, temp_path, info["generation"])
 
-        actual_size = os.path.getsize(local_path)
-        if size > 0 and actual_size != size:
-            os.remove(local_path)
-            raise ToolError(
-                f"Downloaded size {actual_size} does not match expected {size}. "
-                "Partial file deleted."
-            )
+            actual_size = os.path.getsize(temp_path)
+            if size > 0 and actual_size != size:
+                raise ToolError(
+                    f"Downloaded size {actual_size} does not match expected {size}. "
+                    "Partial file discarded."
+                )
+
+            os.replace(temp_path, local_path)
+        except BaseException:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
 
         await ctx.info(f"Successfully downloaded {actual_size:,} bytes to {local_path}")
 
