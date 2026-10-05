@@ -943,6 +943,7 @@ Potential areas for expansion (see [CLAUDE.md](CLAUDE.md) for details):
 - **FISS (firecloud)**: Python client for Terra.Bio API
 - **google-cloud-storage**: For fetching workflow logs and bucket objects from GCS
 - **requests / google-auth**: Used directly by the GCS XML API backend (`--gcs-backend xml`)
+- **socksio**: Lets httpx build a client when a `socks5h://` proxy is in the environment, as it is inside the Claude Science sandbox
 - **Pydantic**: Data validation and schema generation
 
 ## Troubleshooting

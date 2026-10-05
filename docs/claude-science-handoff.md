@@ -14,7 +14,7 @@ Context for a Claude Code session working in `broadinstitute/fiss-mcp`
 session that got the server running inside Claude Science's sandbox. The
 install-side work is done and documented in `CLAUDE_SCIENCE.md` (README
 section) and `scripts/install-claude-science.sh` — add both to the repo. This
-file covers the **code changes** still needed.
+file covers the **code changes** that were still needed when it was written.
 
 ## TL;DR
 
