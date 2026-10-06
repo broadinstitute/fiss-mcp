@@ -534,6 +534,22 @@ than Claude Desktop or Claude Code, so the "clone it anywhere and point at your
 venv" setup from the sections above fails in several ways. This section
 documents what the sandbox does and how to install around it.
 
+> **macOS only, for now.** Everything in this section, including
+> `scripts/install-claude-science.sh` (which refuses to run elsewhere), was
+> written and tested against Claude Science on macOS. Claude Science also ships
+> for Windows 11 and Linux x64, and the server has no macOS dependency, but the
+> install layout here is built around macOS specifics: a Homebrew interpreter
+> outside `$HOME`, `/opt/fiss-mcp`, `/private/tmp`, and the sandbox behaviour
+> observed on that platform. Windows in particular has its own rules for local
+> connectors, where the command must start with `npx`, `node`, `python` or a
+> full program path and launching through `npm` or a `.cmd`, `.bat` or `.ps1`
+> file is unsupported. Nobody has worked out or tested the equivalent setup on
+> either platform. **This limitation is specific to the Claude Science
+> connector.** The server itself is plain Python and runs anywhere Python 3.10+
+> does; see [Claude Desktop Integration](#claude-desktop-integration) and
+> [Claude Code Integration](#claude-code-integration), which have no platform
+> restriction.
+
 Most of what follows is install-side configuration. The one server-side
 setting that matters here is `--gcs-backend`, because Claude Science blocks the
 host the normal Google Cloud Storage client uses; see

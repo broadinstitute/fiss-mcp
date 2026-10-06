@@ -287,6 +287,19 @@ XML backend (`requests`, for sandboxes that block `storage.googleapis.com`):
 - `GET ... {key}` with `Range: bytes=a-b` - Byte range read
 - Auth: `google.auth.default(scopes=[devstorage.read_only])` + `creds.refresh()`, `Authorization: Bearer`
 
+### Claude Science support is macOS-only
+
+The connector install path (`scripts/install-claude-science.sh`, the README's
+Claude Science section) was written and tested only on macOS, and the installer
+dies on anything else: `[[ "$(uname -s)" == "Darwin" ]] || die ...`. Claude
+Science also runs on Windows 11 and Linux x64, and nothing in the server is
+macOS-specific, but the install layout is built around macOS particulars (a
+Homebrew interpreter outside `$HOME`, `/opt/fiss-mcp`, `/private/tmp`, the
+observed sandbox behaviour) and Windows has different local-connector rules
+(command must start with `npx`, `node`, `python` or a full path; `npm`, `.cmd`,
+`.bat` and `.ps1` launches are unsupported). Supporting either means working out
+and *testing* a new layout, not editing the docs.
+
 ### Two GCS backends (`--gcs-backend`)
 
 - **Why**: Claude Science runs local MCP servers in a sandbox that permanently
