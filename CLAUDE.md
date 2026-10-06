@@ -64,8 +64,19 @@ All planned tools have been successfully implemented following test-driven devel
    - Returns dashboard description (markdown), custom attributes/tags, bucket name, Google project, workspace ID, creator/timestamps, lock state, normalized authorization domain group names, and caller's access level
    - Wraps `fapi.get_workspace` (HTTP GET, read-only by design)
 3. ✅ `get_workspace_data_tables` - List data tables in a workspace
-4. ✅ `get_entities` - Read entity data from Terra data tables
-   - Returns all entities of specified type with attributes
+   - Returns row count plus `columns`/`column_count` per table, which are the names
+     to pass to `get_entities(columns=[...])` without first fetching a row
+4. ✅ `get_entities` - Read one page of rows from a Terra data table
+   - Wraps `fapi.get_entities_query` (the `entityQuery` endpoint), **not**
+     `fapi.get_entities`: the unpaginated endpoint returns every row of every
+     column in one response and timed out at 60 s on a 3,473-row x 164-column
+     table (issue #15)
+   - `columns=[...]` selects attributes (maps to the API's `fields`), `page` and
+     `page_size` (max 1000) paginate, `filter_terms` text-matches rows
+   - Response carries `total_pages`, `has_more`, `total_entities` and
+     `matching_entities` so an agent can decide whether to keep paging
+   - HTTP 400 is reported separately, since an unknown column name is the usual
+     cause and the message points at `get_workspace_data_tables`
 
 ### Workflow Monitoring & Status (7 tools)
 4. ✅ `list_submissions` - List all submissions in a workspace
@@ -190,7 +201,7 @@ All planned tools have been successfully implemented following test-driven devel
 - `fapi.list_workspaces()` - List accessible workspaces
 - `fapi.get_workspace(namespace, workspace)` - Get workspace metadata and attributes (dashboard data)
 - `fapi.list_entity_types(namespace, workspace)` - List data tables
-- `fapi.get_entities(namespace, workspace, etype)` - Get all entities of a type
+- `fapi.get_entities_query(namespace, workspace, etype, page=, page_size=, filter_terms=, fields=)` - One page of entities; `fields` is a comma-separated string. Preferred over `fapi.get_entities`, which has no paging and times out on real tables
 
 **Workflow Monitoring:**
 - `fapi.list_submissions(namespace, workspace)` - List all submissions

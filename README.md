@@ -46,8 +46,8 @@ These tools are available in both read-only mode (default) and when write access
 
 - **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
 - **`get_workspace_metadata`** - Get workspace metadata and attributes for dashboard documentation (description, bucket, Google project, access level, authorization domain, timestamps)
-- **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
-- **`get_entities`** - Read entity data from Terra data tables for workflow inputs
+- **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts and column names
+- **`get_entities`** - Read a page of rows from a Terra data table, with column selection (`columns`), paging (`page`, `page_size`) and text filtering (`filter_terms`)
 
 #### Workflow Monitoring & Status
 
@@ -821,7 +821,7 @@ PYTHONPATH=src pytest tests/ -v
 PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 ```
 
-The test suite includes 214 tests:
+The test suite includes 251 tests:
 - Server initialization verification
 - Tool registration checks (all 21 tools)
 - Mocked FISS API responses

@@ -422,6 +422,31 @@ class TestGetWorkspaceDataTables:
             assert result["tables"][1]["count"] == 500
 
     @pytest.mark.asyncio
+    async def test_reports_column_names_for_choosing_get_entities_columns(self):
+        """Issue #15: picking `columns` requires knowing the names up front."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "sample": {
+                "count": 3473,
+                "idName": "sample_id",
+                "attributeNames": ["cram_path", "cram_index", "tissue_type"],
+            },
+            "participant": {"count": 10, "idName": "participant_id"},
+        }
+
+        with patch("terra_mcp.server.fapi.list_entity_types", return_value=mock_response):
+            result = await terra_server.get_workspace_data_tables("ns", "ws", AsyncMock())
+
+        tables = {t["name"]: t for t in result["tables"]}
+        assert tables["sample"]["columns"] == ["cram_path", "cram_index", "tissue_type"]
+        assert tables["sample"]["column_count"] == 3
+        assert tables["sample"]["count"] == 3473
+        # a response without attributeNames must not blow up
+        assert tables["participant"]["columns"] == []
+        assert tables["participant"]["column_count"] == 0
+
+    @pytest.mark.asyncio
     async def test_get_data_tables_workspace_not_found(self):
         """Test handling of non-existent workspace"""
         from fastmcp.exceptions import ToolError
@@ -2680,51 +2705,163 @@ class TestDownloadGcsFile:
 # ===== Phase 3: Workflow Management Tools Tests =====
 
 
+def _entity_page(results, unfiltered=None, filtered=None, pages=None):
+    """Build an entityQuery response: results plus resultMetadata."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    count = len(results) if unfiltered is None else unfiltered
+    mock_response.json.return_value = {
+        "results": results,
+        "resultMetadata": {
+            "unfilteredCount": count,
+            "filteredCount": count if filtered is None else filtered,
+            "filteredPageCount": 1 if pages is None else pages,
+        },
+        "parameters": {},
+    }
+    return mock_response
+
+
+def _sample(name, **attributes):
+    return {"name": name, "entityType": "sample", "attributes": attributes}
+
+
 class TestGetEntities:
-    """Test get_entities tool"""
+    """Test get_entities tool (paginated; see issue #15)"""
 
     @pytest.mark.asyncio
     async def test_get_entities_success(self):
         """Test successful entity retrieval"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = [
-            {
-                "name": "sample_1",
-                "entityType": "sample",
-                "attributes": {
-                    "sample_id": "S001",
-                    "participant": "P001",
-                    "tissue_type": "blood",
-                },
-            },
-            {
-                "name": "sample_2",
-                "entityType": "sample",
-                "attributes": {
-                    "sample_id": "S002",
-                    "participant": "P002",
-                    "tissue_type": "tumor",
-                },
-            },
-        ]
+        mock_response = _entity_page(
+            [
+                _sample("sample_1", sample_id="S001", participant="P001", tissue_type="blood"),
+                _sample("sample_2", sample_id="S002", participant="P002", tissue_type="tumor"),
+            ]
+        )
 
-        with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
-            get_entities_fn = terra_server.get_entities
-
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
             ctx = AsyncMock()
-            result = await get_entities_fn(
+            result = await terra_server.get_entities(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_type="sample",
                 ctx=ctx,
             )
 
-            assert len(result["entities"]) == 2
-            assert result["entity_type"] == "sample"
-            assert result["count"] == 2
-            assert result["entities"][0]["name"] == "sample_1"
-            assert result["entities"][0]["attributes"]["sample_id"] == "S001"
+        assert len(result["entities"]) == 2
+        assert result["entity_type"] == "sample"
+        assert result["count"] == 2
+        assert result["entities"][0]["name"] == "sample_1"
+        assert result["entities"][0]["attributes"]["sample_id"] == "S001"
+        assert result["has_more"] is False
+        assert result["columns"] is None
+
+    @pytest.mark.asyncio
+    async def test_uses_the_paginated_endpoint_with_defaults(self):
+        """The unpaginated endpoint is what timed out, so it must not be used."""
+        mock_response = _entity_page([_sample("s1")])
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response) as query:
+            await terra_server.get_entities("ns", "ws", "sample", AsyncMock())
+
+        kwargs = query.call_args.kwargs
+        assert kwargs["page"] == 1
+        assert kwargs["page_size"] == 100
+        assert kwargs["fields"] is None
+        assert kwargs["filter_terms"] is None
+
+    @pytest.mark.asyncio
+    async def test_columns_are_passed_as_a_field_list(self):
+        """Issue #15: 2 of 164 columns were needed."""
+        mock_response = _entity_page([_sample("s1", cram_path="gs://b/s1.cram")])
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response) as query:
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), columns=["cram_path", "cram_index"]
+            )
+
+        assert query.call_args.kwargs["fields"] == "cram_path,cram_index"
+        assert result["columns"] == ["cram_path", "cram_index"]
+
+    @pytest.mark.asyncio
+    async def test_filter_terms_are_forwarded(self):
+        mock_response = _entity_page([_sample("NA12878")], unfiltered=3473, filtered=1, pages=1)
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response) as query:
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), filter_terms="NA12878"
+            )
+
+        assert query.call_args.kwargs["filter_terms"] == "NA12878"
+        assert result["total_entities"] == 3473
+        assert result["matching_entities"] == 1
+        assert result["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_reports_pagination_state_for_a_large_table(self):
+        """The 3,473-row table from the issue, at the default page size."""
+        rows = [_sample(f"s{i}") for i in range(100)]
+        mock_response = _entity_page(rows, unfiltered=3473, filtered=3473, pages=35)
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            result = await terra_server.get_entities("ns", "ws", "sample", AsyncMock(), page=2)
+
+        assert result["count"] == 100
+        assert result["page"] == 2
+        assert result["total_pages"] == 35
+        assert result["has_more"] is True
+        assert result["total_entities"] == 3473
+
+    @pytest.mark.asyncio
+    async def test_last_page_reports_no_more(self):
+        mock_response = _entity_page([_sample("s1")], unfiltered=3473, filtered=3473, pages=35)
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            result = await terra_server.get_entities("ns", "ws", "sample", AsyncMock(), page=35)
+
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_total_pages_derived_when_terra_omits_it(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": [_sample("s1")],
+            "resultMetadata": {"unfilteredCount": 250, "filteredCount": 250},
+        }
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), page_size=100
+            )
+
+        assert result["total_pages"] == 3  # ceiling of 250/100
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_range_paging(self):
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="page must be 1 or greater"):
+            await terra_server.get_entities("ns", "ws", "sample", AsyncMock(), page=0)
+        with pytest.raises(ToolError, match="page_size must be between 1 and 1000"):
+            await terra_server.get_entities("ns", "ws", "sample", AsyncMock(), page_size=0)
+        with pytest.raises(ToolError, match="page_size must be between 1 and 1000"):
+            await terra_server.get_entities("ns", "ws", "sample", AsyncMock(), page_size=5000)
+
+    @pytest.mark.asyncio
+    async def test_bad_column_name_explains_how_to_find_valid_ones(self):
+        from fastmcp.exceptions import ToolError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = "Attribute nonexistent not found"
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            with pytest.raises(ToolError, match="get_workspace_data_tables"):
+                await terra_server.get_entities(
+                    "ns", "ws", "sample", AsyncMock(), columns=["nonexistent"]
+                )
 
     @pytest.mark.asyncio
     async def test_get_entities_workspace_not_found(self):
@@ -2734,42 +2871,36 @@ class TestGetEntities:
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
-            get_entities_fn = terra_server.get_entities
-
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
             ctx = AsyncMock()
 
             with pytest.raises(ToolError) as exc_info:
-                await get_entities_fn(
+                await terra_server.get_entities(
                     workspace_namespace="nonexistent",
                     workspace_name="workspace",
                     entity_type="sample",
                     ctx=ctx,
                 )
 
-            error_msg = str(exc_info.value)
-            assert "not found" in error_msg
+            assert "not found" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_get_entities_empty_table(self):
         """Test workspace with no entities of given type"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = []
+        mock_response = _entity_page([], unfiltered=0, filtered=0, pages=0)
 
-        with patch("terra_mcp.server.fapi.get_entities", return_value=mock_response):
-            get_entities_fn = terra_server.get_entities
-
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
             ctx = AsyncMock()
-            result = await get_entities_fn(
+            result = await terra_server.get_entities(
                 workspace_namespace="test-ns",
                 workspace_name="test-ws",
                 entity_type="participant",
                 ctx=ctx,
             )
 
-            assert result["count"] == 0
-            assert result["entities"] == []
+        assert result["count"] == 0
+        assert result["entities"] == []
+        assert result["has_more"] is False
 
 
 class TestGetMethodConfig:

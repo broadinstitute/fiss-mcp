@@ -24,6 +24,10 @@ from terra_mcp import gcs
 
 logger = logging.getLogger(__name__)
 
+# Entity pages are fetched one at a time; Terra will accept more, but a page
+# large enough to time out is the bug this limit exists to prevent.
+MAX_ENTITY_PAGE_SIZE = 1000
+
 # Global flag to control write access (default: read-only mode)
 ALLOW_WRITES = False
 
@@ -945,7 +949,12 @@ async def get_workspace_data_tables(
     Returns:
         Dictionary containing:
         - workspace: Full workspace identifier (namespace/name)
-        - tables: List of tables with name and count fields
+        - tables: List of tables, each with:
+          - name: Table (entity type) name
+          - count: Number of rows
+          - columns: Attribute names available on that table, which are the
+            values to pass to get_entities(columns=[...])
+          - column_count: Number of attributes
     """
     try:
         await ctx.info(f"Fetching data tables for workspace {workspace_namespace}/{workspace_name}")
@@ -980,6 +989,10 @@ async def get_workspace_data_tables(
                 {
                     "name": name,
                     "count": details["count"],
+                    # Needed to pass `columns` to get_entities on a wide table
+                    # without fetching a row first just to learn the names.
+                    "columns": details.get("attributeNames", []),
+                    "column_count": len(details.get("attributeNames", [])),
                 }
                 for name, details in entity_types.items()
             ],
@@ -2563,43 +2576,99 @@ async def get_entities(
     workspace_name: Annotated[str, "Terra workspace name"],
     entity_type: Annotated[str, "Entity type to retrieve (e.g., 'sample', 'participant')"],
     ctx: Context,
+    columns: Annotated[
+        list[str] | None,
+        "Attribute names to return, e.g. ['cram_path', 'cram_index']. "
+        "Omit to return every column, which on a wide table is rarely what you want. "
+        "Available names come from get_workspace_data_tables.",
+    ] = None,
+    page: Annotated[int, "1-indexed page number"] = 1,
+    page_size: Annotated[int, "Rows per page, 1 to 1000"] = 100,
+    filter_terms: Annotated[
+        str | None,
+        "Space-separated text matched against the rows, e.g. a sample name. "
+        "Use this to fetch one known row instead of paging to find it.",
+    ] = None,
 ) -> dict[str, Any]:
-    """Get all entities of a specific type from a Terra data table.
+    """Read one page of rows from a Terra data table.
 
-    Entities represent rows in Terra data tables and are used as workflow inputs.
-    This tool retrieves all entities of a given type along with their attributes.
+    Entities are rows in Terra data tables and are used as workflow inputs. This
+    tool returns a single page, so it is safe on tables of any size.
 
-    **CONTEXT WARNING FOR LARGE TABLES:**
-    Data tables can contain thousands of entities, each with many attributes.
-    Before calling this tool, use get_workspace_data_tables to check row counts.
-    For tables with 100+ entities, consider whether you truly need all data,
-    or if you can work with specific entity names from workflow inputs instead.
+    **Fetch the narrowest thing that answers the question.** A realistic table
+    can be thousands of rows by a hundred-plus columns, which neither Terra nor
+    a context window handles well:
+
+    1. Call get_workspace_data_tables first. It reports each table's row count
+       and its column names.
+    2. Pass `columns` with only the attributes you need. This is the difference
+       that matters most on a wide table.
+    3. Looking for specific rows? Pass `filter_terms` instead of paging through
+       the table to find them.
+    4. Need everything? Page with `page` and `page_size`, using `total_pages`
+       from the response, and stop as soon as you have what you need.
 
     Common use cases:
-    - Retrieve sample/participant data for workflow submission
-    - Verify entity attributes before launching workflows
-    - Inspect data table contents
+    - Read two path columns for a set of samples to launch a workflow
+    - Find one row by sample name with filter_terms
+    - Inspect a table's shape before deciding what to pull
 
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         entity_type: The entity type to retrieve (matches data table name)
+        columns: Attribute names to include. None returns all attributes.
+        page: 1-indexed page number (default 1)
+        page_size: Rows per page, 1 to 1000 (default 100)
+        filter_terms: Space-separated text to match rows against
 
     Returns:
         Dictionary containing:
         - entity_type: The entity type requested
-        - count: Number of entities returned
+        - count: Number of entities on this page
         - entities: List of entity objects with name, entityType, and attributes
+        - page, page_size: The page returned
+        - total_pages: Pages available at this page_size
+        - has_more: True if further pages exist
+        - total_entities: Rows in the table, before any filter_terms
+        - matching_entities: Rows matching filter_terms (equal to total_entities
+          when no filter is given)
+        - columns: The column selection applied, or None if all were returned
     """
     try:
+        if page < 1:
+            raise ToolError(f"page must be 1 or greater, got {page}")
+        if not 1 <= page_size <= MAX_ENTITY_PAGE_SIZE:
+            raise ToolError(
+                f"page_size must be between 1 and {MAX_ENTITY_PAGE_SIZE}, got {page_size}"
+            )
+
         await ctx.info(
-            f"Fetching entities of type '{entity_type}' from workspace "
+            f"Fetching page {page} ({page_size} rows) of '{entity_type}' from "
             f"{workspace_namespace}/{workspace_name}"
+            + (f", columns={columns}" if columns else ", all columns")
         )
 
-        response = fapi.get_entities(workspace_namespace, workspace_name, entity_type)
+        # entityQuery, not the unpaginated entities endpoint: that one returns
+        # every row of every column in one response and times out on real tables.
+        response = fapi.get_entities_query(
+            workspace_namespace,
+            workspace_name,
+            entity_type,
+            page=page,
+            page_size=page_size,
+            filter_terms=filter_terms,
+            fields=",".join(columns) if columns else None,
+        )
 
-        if response.status_code == 404:
+        if response.status_code == 400:
+            raise ToolError(
+                f"Terra rejected the query for '{entity_type}' (HTTP 400). "
+                "A column name that does not exist on the table is the usual cause; "
+                "get_workspace_data_tables lists the valid names. "
+                f"Details: {response.text}"
+            )
+        elif response.status_code == 404:
             raise ToolError(
                 f"Workspace '{workspace_namespace}/{workspace_name}' or entity type "
                 f"'{entity_type}' not found. Please verify the workspace and entity type are correct."
@@ -2618,13 +2687,31 @@ async def get_entities(
                 "Please check the workspace and entity type."
             )
 
-        entities = response.json()
-        await ctx.info(f"Successfully retrieved {len(entities)} entities of type '{entity_type}'")
+        payload = response.json()
+        entities = payload.get("results", [])
+        metadata = payload.get("resultMetadata") or {}
+        total_entities = metadata.get("unfilteredCount")
+        matching_entities = metadata.get("filteredCount", total_entities)
+        total_pages = metadata.get("filteredPageCount")
+        if total_pages is None and isinstance(matching_entities, int):
+            total_pages = -(-matching_entities // page_size)  # ceiling division
+
+        await ctx.info(
+            f"Retrieved {len(entities)} entities of type '{entity_type}' "
+            f"(page {page} of {total_pages if total_pages is not None else '?'})"
+        )
 
         return {
             "entity_type": entity_type,
             "count": len(entities),
             "entities": entities,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_more": bool(total_pages is not None and page < total_pages),
+            "total_entities": total_entities,
+            "matching_entities": matching_entities,
+            "columns": columns,
         }
 
     except ToolError:
