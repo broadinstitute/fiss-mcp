@@ -2710,11 +2710,14 @@ async def get_entities(
         if max_response_bytes and entities:
             response_bytes = len(json.dumps(entities, default=str))
             if response_bytes > max_response_bytes:
+                # Terra omits unset attributes per row, so this is the first
+                # row's width, not the table's; the table may have more columns.
                 attribute_count = len(entities[0].get("attributes", {}))
                 raise ToolError(
                     f"This page is {response_bytes:,} bytes, over the "
-                    f"{max_response_bytes:,} byte limit: {len(entities)} rows x "
-                    f"{attribute_count} attributes. Narrow the query rather than "
+                    f"{max_response_bytes:,} byte limit: {len(entities)} rows, "
+                    f"{attribute_count} attributes on the first row. Narrow the query "
+                    "rather than "
                     "loading this into context. Pass columns=[...] with just the "
                     "attributes you need (get_workspace_data_tables lists the names "
                     "for this table), reduce page_size, or raise max_response_bytes "

@@ -2877,7 +2877,7 @@ class TestGetEntities:
 
         message = str(exc_info.value)
         assert "over the 250,000 byte limit" in message
-        assert "100 rows x 163 attributes" in message
+        assert "100 rows, 163 attributes on the first row" in message
         assert "columns=[...]" in message
         assert "get_workspace_data_tables" in message
 
