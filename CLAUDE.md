@@ -68,15 +68,29 @@ All planned tools have been successfully implemented following test-driven devel
      to pass to `get_entities(columns=[...])` without first fetching a row
 4. ✅ `get_entities` - Read one page of rows from a Terra data table
    - Wraps `fapi.get_entities_query` (the `entityQuery` endpoint), **not**
-     `fapi.get_entities`: the unpaginated endpoint returns every row of every
-     column in one response and timed out at 60 s on a 3,473-row x 164-column
-     table (issue #15)
+     `fapi.get_entities` (issue #15)
    - `columns=[...]` selects attributes (maps to the API's `fields`), `page` and
      `page_size` (max 1000) paginate, `filter_terms` text-matches rows
    - Response carries `total_pages`, `has_more`, `total_entities` and
      `matching_entities` so an agent can decide whether to keep paging
    - HTTP 400 is reported separately, since an unknown column name is the usual
      cause and the message points at `get_workspace_data_tables`
+   - **The problem was size, not latency.** Measured against
+     `broad-firecloud-dsde-methods/sr-malaria`, table `sample`, 3,473 rows x 163
+     attributes:
+
+     | Call | Time | Bytes |
+     |---|---|---|
+     | `fapi.get_entities` (old, whole table) | 2.8 s | 37,094,614 |
+     | one page, all columns | 0.2 s | 1,081,058 |
+     | one page, 2 columns | 0.3 s | 28,444 |
+     | `filter_terms="3D7"` (94 matches) | 1.1 s | 27,372 |
+
+     Terra was never slow; the 60 s client timeout was 37 MB in transit. Paging
+     alone is therefore not enough: one page of every column is still ~1 MB,
+     roughly 270k tokens, so `max_response_bytes` (default 250,000, 0 disables)
+     refuses an oversized page with instructions to pass `columns`, lower
+     `page_size`, or raise the limit deliberately
 
 ### Workflow Monitoring & Status (7 tools)
 4. ✅ `list_submissions` - List all submissions in a workspace

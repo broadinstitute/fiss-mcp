@@ -2864,6 +2864,56 @@ class TestGetEntities:
                 )
 
     @pytest.mark.asyncio
+    async def test_oversized_page_is_refused_with_advice(self):
+        """A real 163-column table returns ~1.08 MB per 100 rows; that must not land."""
+        from fastmcp.exceptions import ToolError
+
+        wide = [_sample(f"s{i}", **{f"col_{c}": "x" * 60 for c in range(163)}) for i in range(100)]
+        mock_response = _entity_page(wide, unfiltered=3473, filtered=3473, pages=35)
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            with pytest.raises(ToolError) as exc_info:
+                await terra_server.get_entities("ns", "ws", "sample", AsyncMock())
+
+        message = str(exc_info.value)
+        assert "over the 250,000 byte limit" in message
+        assert "100 rows x 163 attributes" in message
+        assert "columns=[...]" in message
+        assert "get_workspace_data_tables" in message
+
+    @pytest.mark.asyncio
+    async def test_narrow_page_passes_the_size_guard(self):
+        """The same table with two columns is ~28 KB and must come straight through."""
+        narrow = [
+            _sample(f"s{i}", aligned_bam="gs://bucket/" + "p" * 80, aligned_bai="gs://b/x.bai")
+            for i in range(100)
+        ]
+        mock_response = _entity_page(narrow, unfiltered=3473, filtered=3473, pages=35)
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), columns=["aligned_bam", "aligned_bai"]
+            )
+
+        assert result["count"] == 100
+
+    @pytest.mark.asyncio
+    async def test_size_guard_can_be_disabled_or_raised(self):
+        wide = [_sample(f"s{i}", **{f"col_{c}": "x" * 60 for c in range(163)}) for i in range(100)]
+        mock_response = _entity_page(wide, unfiltered=3473, filtered=3473, pages=35)
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response):
+            disabled = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), max_response_bytes=0
+            )
+            raised = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), max_response_bytes=50_000_000
+            )
+
+        assert disabled["count"] == 100
+        assert raised["count"] == 100
+
+    @pytest.mark.asyncio
     async def test_get_entities_workspace_not_found(self):
         """Test handling of non-existent workspace"""
         from fastmcp.exceptions import ToolError

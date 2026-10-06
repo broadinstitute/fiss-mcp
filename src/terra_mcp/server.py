@@ -25,8 +25,14 @@ from terra_mcp import gcs
 logger = logging.getLogger(__name__)
 
 # Entity pages are fetched one at a time; Terra will accept more, but a page
-# large enough to time out is the bug this limit exists to prevent.
+# large enough to swamp the caller is the bug this limit exists to prevent.
 MAX_ENTITY_PAGE_SIZE = 1000
+
+# Measured against a real table: 100 rows x 163 attributes is 1.08 MB, roughly
+# 270k tokens of JSON. Terra returns it in a fraction of a second, so size, not
+# latency, is what makes a wide table unusable. Pages above this are refused
+# with instructions rather than returned.
+DEFAULT_MAX_ENTITY_RESPONSE_BYTES = 250_000
 
 # Global flag to control write access (default: read-only mode)
 ALLOW_WRITES = False
@@ -2589,6 +2595,11 @@ async def get_entities(
         "Space-separated text matched against the rows, e.g. a sample name. "
         "Use this to fetch one known row instead of paging to find it.",
     ] = None,
+    max_response_bytes: Annotated[
+        int,
+        "Refuse pages whose JSON exceeds this size, with advice on narrowing the "
+        "query. 0 disables the check.",
+    ] = DEFAULT_MAX_ENTITY_RESPONSE_BYTES,
 ) -> dict[str, Any]:
     """Read one page of rows from a Terra data table.
 
@@ -2602,7 +2613,9 @@ async def get_entities(
     1. Call get_workspace_data_tables first. It reports each table's row count
        and its column names.
     2. Pass `columns` with only the attributes you need. This is the difference
-       that matters most on a wide table.
+       that matters most on a wide table: on a real 163-column table, one page
+       of 100 rows is 1.08 MB with every column and 28 KB with two. Pages over
+       `max_response_bytes` are refused rather than returned.
     3. Looking for specific rows? Pass `filter_terms` instead of paging through
        the table to find them.
     4. Need everything? Page with `page` and `page_size`, using `total_pages`
@@ -2621,6 +2634,9 @@ async def get_entities(
         page: 1-indexed page number (default 1)
         page_size: Rows per page, 1 to 1000 (default 100)
         filter_terms: Space-separated text to match rows against
+        max_response_bytes: Reject a page whose JSON exceeds this size, rather
+            than returning it (default 250,000; 0 disables). A wide table
+            returns about 1 MB per 100 rows when no columns are selected.
 
     Returns:
         Dictionary containing:
@@ -2689,6 +2705,21 @@ async def get_entities(
 
         payload = response.json()
         entities = payload.get("results", [])
+
+        # Terra answers a wide table quickly; it is the volume that is unusable.
+        if max_response_bytes and entities:
+            response_bytes = len(json.dumps(entities, default=str))
+            if response_bytes > max_response_bytes:
+                attribute_count = len(entities[0].get("attributes", {}))
+                raise ToolError(
+                    f"This page is {response_bytes:,} bytes, over the "
+                    f"{max_response_bytes:,} byte limit: {len(entities)} rows x "
+                    f"{attribute_count} attributes. Narrow the query rather than "
+                    "loading this into context. Pass columns=[...] with just the "
+                    "attributes you need (get_workspace_data_tables lists the names "
+                    "for this table), reduce page_size, or raise max_response_bytes "
+                    "if you genuinely need all of it."
+                )
         metadata = payload.get("resultMetadata") or {}
         total_entities = metadata.get("unfilteredCount")
         matching_entities = metadata.get("filteredCount", total_entities)
