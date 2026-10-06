@@ -101,6 +101,26 @@ async def _check_write_access(ctx: Context) -> None:
         )
 
 
+# The four fields this tool returns. Without `fields`, Terra builds and sends the
+# complete object for every workspace an account can see (thousands), and the
+# tool then throws nearly all of it away.
+WORKSPACE_LIST_FIELDS = (
+    "workspace.namespace,workspace.name,workspace.createdBy,workspace.createdDate"
+)
+
+
+def _list_workspaces_response():
+    """Request only the fields list_workspaces returns, tolerating older Terra.
+
+    `fields` is supported by the current API; fall back to an unfiltered request
+    rather than failing outright if a deployment rejects it.
+    """
+    response = fapi.list_workspaces(fields=WORKSPACE_LIST_FIELDS)
+    if response.status_code == 400:
+        return fapi.list_workspaces()
+    return response
+
+
 def _truncate_log_content(content: str, max_chars: int = 25000) -> tuple[str, bool]:
     """Apply smart truncation to log content.
 
@@ -780,18 +800,51 @@ def _detect_batch_issues(status_events: list[dict[str, Any]]) -> list[dict[str, 
 
 
 @mcp.tool()
-async def list_workspaces(ctx: Context) -> list[dict[str, Any]]:
-    """List all Terra workspaces accessible to the authenticated user.
+async def list_workspaces(
+    ctx: Context,
+    name_contains: Annotated[
+        str | None, "Case-insensitive substring to match against the workspace name"
+    ] = None,
+    namespace: Annotated[
+        str | None, "Only workspaces in this billing namespace (exact, case-insensitive)"
+    ] = None,
+    limit: Annotated[
+        int | None, "Maximum workspaces to return (default 100, use None for all)"
+    ] = 100,
+) -> dict[str, Any]:
+    """List Terra workspaces accessible to the authenticated user.
 
-    Returns workspace information including namespace, name, creator, and creation date.
-    This tool requires valid Google credentials configured for FISS API access.
+    An account can see thousands of workspaces, so this returns a filtered,
+    capped slice rather than everything. Pass `name_contains` or `namespace`
+    when you are looking for a particular workspace; the counts in the response
+    tell you whether the filter was narrow enough.
+
+    Only four fields are requested from Terra (namespace, name, creator,
+    creation date), which is what the tool returns. Use get_workspace_metadata
+    for the full detail of one workspace.
+
+    Args:
+        name_contains: Case-insensitive substring match on the workspace name
+        namespace: Exact, case-insensitive billing namespace
+        limit: Maximum rows to return (default 100; None or 0 returns all matches)
 
     Returns:
-        List of workspace dictionaries with keys: namespace, name, created_by, created_date
+        Dictionary containing:
+        - workspaces: List of dicts with namespace, name, created_by, created_date,
+          sorted by namespace then name
+        - count: Number returned
+        - matching: Number matching the filters, before the limit
+        - total_accessible: Number of workspaces visible to the account
+        - truncated: True if matching exceeded the limit
+        - filters: The filters applied
     """
     try:
-        await ctx.info("Fetching accessible Terra workspaces")
-        response = fapi.list_workspaces()
+        await ctx.info(
+            "Fetching accessible Terra workspaces"
+            + (f" matching name~{name_contains!r}" if name_contains else "")
+            + (f" in namespace {namespace!r}" if namespace else "")
+        )
+        response = _list_workspaces_response()
 
         if response.status_code != 200:
             await _log_error(
@@ -803,20 +856,46 @@ async def list_workspaces(ctx: Context) -> list[dict[str, Any]]:
             )
 
         workspaces = response.json()
-        await ctx.info(f"Successfully retrieved {len(workspaces)} accessible workspaces")
+        total_accessible = len(workspaces)
 
-        # Extract relevant workspace information
-        result = [
+        rows = [
             {
                 "namespace": ws["workspace"]["namespace"],
                 "name": ws["workspace"]["name"],
-                "created_by": ws["workspace"]["createdBy"],
-                "created_date": ws["workspace"]["createdDate"],
+                "created_by": ws["workspace"].get("createdBy"),
+                "created_date": ws["workspace"].get("createdDate"),
             }
             for ws in workspaces
         ]
 
-        return result
+        # Terra has no server-side name filter on this endpoint, so filter here.
+        # The payload is small now that only four fields are requested.
+        if namespace:
+            wanted = namespace.casefold()
+            rows = [r for r in rows if (r["namespace"] or "").casefold() == wanted]
+        if name_contains:
+            needle = name_contains.casefold()
+            rows = [r for r in rows if needle in (r["name"] or "").casefold()]
+
+        rows.sort(key=lambda r: ((r["namespace"] or ""), (r["name"] or "")))
+        matching = len(rows)
+
+        if limit:
+            rows = rows[:limit]
+
+        await ctx.info(
+            f"Returning {len(rows)} of {matching} matching workspaces "
+            f"({total_accessible} accessible)"
+        )
+
+        return {
+            "workspaces": rows,
+            "count": len(rows),
+            "matching": matching,
+            "total_accessible": total_accessible,
+            "truncated": bool(limit) and matching > limit,
+            "filters": {"name_contains": name_contains, "namespace": namespace},
+        }
 
     except ToolError:
         # Re-raise ToolErrors as-is

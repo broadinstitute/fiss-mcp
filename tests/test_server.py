@@ -146,12 +146,124 @@ class TestListWorkspaces:
             ctx = AsyncMock()
             result = await list_workspaces_fn(ctx)
 
-            # Verify result structure
-            assert len(result) == 2
-            assert result[0]["namespace"] == "test-namespace"
-            assert result[0]["name"] == "test-workspace"
-            assert result[0]["created_by"] == "user@example.com"
-            assert result[1]["namespace"] == "another-namespace"
+            # Verify result structure (sorted by namespace, then name)
+            assert result["count"] == 2
+            assert result["matching"] == 2
+            assert result["total_accessible"] == 2
+            assert result["truncated"] is False
+            rows = result["workspaces"]
+            assert rows[0]["namespace"] == "another-namespace"
+            assert rows[0]["name"] == "another-workspace"
+            assert rows[1]["namespace"] == "test-namespace"
+            assert rows[1]["created_by"] == "user@example.com"
+
+    @staticmethod
+    def _many(count):
+        """A Terra response with `count` workspaces across two namespaces."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "workspace": {
+                    "namespace": "broad-firecloud-dsde-methods" if i % 2 else "other-ns",
+                    "name": f"sr-malaria-{i}" if i % 3 == 0 else f"project-{i}",
+                    "createdBy": "user@example.com",
+                    "createdDate": "2024-01-01T00:00:00Z",
+                }
+            }
+            for i in range(count)
+        ]
+        return mock_response
+
+    @pytest.mark.asyncio
+    async def test_requests_only_the_four_fields_it_returns(self):
+        """Issue #16: Terra otherwise sends every field of every workspace."""
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(3)) as listing:
+            await terra_server.list_workspaces(AsyncMock())
+
+        assert listing.call_args.kwargs["fields"] == terra_server.WORKSPACE_LIST_FIELDS
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_terra_rejects_the_fields_parameter(self):
+        rejected = MagicMock(status_code=400)
+        accepted = self._many(2)
+
+        with patch(
+            "terra_mcp.server.fapi.list_workspaces", side_effect=[rejected, accepted]
+        ) as listing:
+            result = await terra_server.list_workspaces(AsyncMock())
+
+        assert listing.call_count == 2
+        assert listing.call_args_list[1].kwargs == {}  # retried without fields
+        assert result["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_name_contains_filters_case_insensitively(self):
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(30)):
+            result = await terra_server.list_workspaces(AsyncMock(), name_contains="SR-Malaria")
+
+        assert result["matching"] == 10  # every third of 30
+        assert result["total_accessible"] == 30
+        assert all("sr-malaria" in w["name"] for w in result["workspaces"])
+        assert result["filters"]["name_contains"] == "SR-Malaria"
+
+    @pytest.mark.asyncio
+    async def test_namespace_filters_exactly(self):
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(10)):
+            result = await terra_server.list_workspaces(
+                AsyncMock(), namespace="BROAD-FireCloud-DSDE-Methods"
+            )
+
+        assert result["matching"] == 5
+        assert {w["namespace"] for w in result["workspaces"]} == {"broad-firecloud-dsde-methods"}
+
+    @pytest.mark.asyncio
+    async def test_filters_combine(self):
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(30)):
+            result = await terra_server.list_workspaces(
+                AsyncMock(), namespace="other-ns", name_contains="sr-malaria"
+            )
+
+        assert all(
+            w["namespace"] == "other-ns" and "sr-malaria" in w["name"] for w in result["workspaces"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_limit_caps_the_rows_and_reports_truncation(self):
+        """The reported case was 2,234 workspaces."""
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(2234)):
+            result = await terra_server.list_workspaces(AsyncMock())
+
+        assert result["count"] == 100  # default limit
+        assert result["matching"] == 2234
+        assert result["total_accessible"] == 2234
+        assert result["truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_limit_none_returns_everything(self):
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(2234)):
+            result = await terra_server.list_workspaces(AsyncMock(), limit=None)
+
+        assert result["count"] == 2234
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_rows_are_sorted_by_namespace_then_name(self):
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(20)):
+            result = await terra_server.list_workspaces(AsyncMock())
+
+        keys = [(w["namespace"], w["name"]) for w in result["workspaces"]]
+        assert keys == sorted(keys)
+
+    @pytest.mark.asyncio
+    async def test_no_match_is_an_empty_result_not_an_error(self):
+        with patch("terra_mcp.server.fapi.list_workspaces", return_value=self._many(10)):
+            result = await terra_server.list_workspaces(AsyncMock(), name_contains="nothing-here")
+
+        assert result["count"] == 0
+        assert result["matching"] == 0
+        assert result["workspaces"] == []
+        assert result["total_accessible"] == 10
 
     @pytest.mark.asyncio
     async def test_list_workspaces_api_error(self):
@@ -4296,8 +4408,8 @@ class TestReadOnlyMode:
                 result = await list_workspaces_fn(ctx)
 
                 # Should succeed even with writes disabled
-                assert len(result) == 1
-                assert result[0]["namespace"] == "test-ns"
+                assert result["count"] == 1
+                assert result["workspaces"][0]["namespace"] == "test-ns"
 
         finally:
             server_module.ALLOW_WRITES = original_allow_writes

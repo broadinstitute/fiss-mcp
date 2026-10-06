@@ -44,7 +44,7 @@ These tools are available in both read-only mode (default) and when write access
 
 #### Workspace & Data Discovery
 
-- **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
+- **`list_workspaces`** - List Terra workspaces accessible to the authenticated user, filtered by `name_contains` / `namespace` and capped by `limit` (default 100)
 - **`get_workspace_metadata`** - Get workspace metadata and attributes for dashboard documentation (description, bucket, Google project, access level, authorization domain, timestamps)
 - **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts and column names
 - **`get_entities`** - Read a page of rows from a Terra data table, with column selection (`columns`), paging (`page`, `page_size`), text filtering (`filter_terms`) and a response-size guard (`max_response_bytes`) that refuses an oversized page instead of returning it

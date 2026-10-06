@@ -59,7 +59,16 @@ python -m terra_mcp.server --allow-writes
 All planned tools have been successfully implemented following test-driven development (TDD) principles.
 
 ### Workspace & Data Discovery (4 tools)
-1. ✅ `list_workspaces` - List user's accessible Terra workspaces
+1. ✅ `list_workspaces` - List the account's accessible Terra workspaces
+   - `name_contains` (case-insensitive substring on the name), `namespace`
+     (exact, case-insensitive) and `limit` (default 100, None for all); rows are
+     sorted by namespace then name
+   - Requests only four fields via `fapi.list_workspaces(fields=...)`. Without
+     it Terra builds and transfers the complete object for every workspace an
+     account can see (2,234 in the reported case) and the tool discards nearly
+     all of it; a 400 falls back to an unfiltered request (issue #16)
+   - Returns a dict (`workspaces`, `count`, `matching`, `total_accessible`,
+     `truncated`, `filters`), not a bare list
 2. ✅ `get_workspace_metadata` - Get workspace metadata and attributes for dashboard documentation
    - Returns dashboard description (markdown), custom attributes/tags, bucket name, Google project, workspace ID, creator/timestamps, lock state, normalized authorization domain group names, and caller's access level
    - Wraps `fapi.get_workspace` (HTTP GET, read-only by design)
@@ -212,7 +221,7 @@ All planned tools have been successfully implemented following test-driven devel
 ### FISS API Functions Used
 
 **Workspace & Discovery:**
-- `fapi.list_workspaces()` - List accessible workspaces
+- `fapi.list_workspaces(fields=...)` - List accessible workspaces; `fields` is a comma-separated list of dotted paths such as `workspace.namespace,workspace.name`, and without it Terra returns every field of every workspace
 - `fapi.get_workspace(namespace, workspace)` - Get workspace metadata and attributes (dashboard data)
 - `fapi.list_entity_types(namespace, workspace)` - List data tables
 - `fapi.get_entities_query(namespace, workspace, etype, page=, page_size=, filter_terms=, fields=)` - One page of entities; `fields` is a comma-separated string. Preferred over `fapi.get_entities`, which has no paging and times out on real tables
