@@ -16,6 +16,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
   - [Example Usage](#example-usage)
 - [Data Privacy and Security Considerations](#data-privacy-and-security-considerations)
 - [Installation](#installation)
+  - [Pointing at a different Terra deployment](#pointing-at-a-different-terra-deployment)
 - [Usage](#usage)
   - [Running the Server (Development)](#running-the-server-development)
   - [Running the Server (Production)](#running-the-server-production)
@@ -284,7 +285,34 @@ The NIH and other regulatory bodies have issued guidance on the use of generativ
 
 - Python 3.10 or higher
 - Google credentials configured for Terra.Bio access (via FISS)
-- Terra.Bio account with workspace access
+- Terra.Bio account with workspace access. Any Terra account works; nothing here
+  is specific to one institution.
+- A **Google-backed** Terra workspace, for part of the toolset. The GCS tools
+  (`list_gcs_objects`, `get_gcs_object_metadata`, `read_gcs_object`,
+  `download_gcs_file`, and `get_workflow_logs(fetch_content=True)`) assume
+  `gs://` buckets, and `get_batch_job_status` assumes Google Batch, so neither
+  applies to a workspace backed by Azure storage. The Terra API tools
+  (workspaces, data tables, entities, submissions, method configs, outputs,
+  cost) do not care.
+- `get_batch_job_status` additionally needs the workspace's Cromwell to run on
+  Google Batch. A workspace still on the older Pipelines API backend has no
+  Batch job to query.
+
+#### Pointing at a different Terra deployment
+
+Every Terra call goes through FISS, which reads its API root from
+`~/.fissconfig` (or a `.fissconfig` in the working directory) and defaults to
+`https://api.firecloud.org/api/`. No part of this server hardcodes that host.
+To use another deployment, set `root_url` under `[DEFAULT]`:
+
+```ini
+[DEFAULT]
+root_url = https://api.firecloud.example.org/api/
+```
+
+Then substitute your own host wherever this README writes
+`api.firecloud.org`, including the Claude Science
+[Allowed domains](#allowed-domains) list.
 
 ### Setup
 
@@ -633,7 +661,7 @@ www.googleapis.com
 | Domain | Needed by |
 |---|---|
 | `oauth2.googleapis.com` | Token refresh — nothing works without it |
-| `api.firecloud.org` | Terra / FISS API: workspaces, entities, submissions, method configs, outputs, cost |
+| `api.firecloud.org` | Terra / FISS API: workspaces, entities, submissions, method configs, outputs, cost. Replace with your own host if `root_url` in `~/.fissconfig` points at a different Terra deployment (see [Prerequisites](#prerequisites)) |
 | `batch.googleapis.com` | `get_batch_job_status` |
 | `www.googleapis.com` | Some google-auth and client-library calls |
 

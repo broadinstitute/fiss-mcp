@@ -210,6 +210,21 @@ All planned tools have been successfully implemented following test-driven devel
 - **Workflow**: Individual WDL execution within a submission
 - **Job**: Individual task execution within a workflow
 
+### Portability: what is and is not Terra-deployment specific
+
+- **The API host is not hardcoded.** Every call goes through FISS, which reads
+  `root_url` from `[DEFAULT]` in `~/.fissconfig` (or `./.fissconfig`) and
+  defaults to `https://api.firecloud.org/api/`. Verified: a `.fissconfig` with
+  `root_url` set is honoured by `fccore.config_parse()`. Nothing in this
+  repository assumes one institution's Terra.
+- **Google-backed workspaces are assumed by two tool groups.** The GCS tools and
+  `get_batch_job_status` depend on `gs://` buckets and Google Batch
+  respectively, so they do not apply to a Terra workspace backed by Azure
+  storage; the FISS tools are unaffected. `get_batch_job_status` also needs the
+  workspace's Cromwell to be on Batch rather than the older Pipelines API.
+- **Requester-pays buckets** are unsupported in both GCS backends (would need
+  `userProject` / `user_project`).
+
 ### Important FISS API Notes
 - API has rate limits - implement exponential backoff
 - Workflow logs are in Google Cloud Storage (GCS), accessed via gs:// URLs
