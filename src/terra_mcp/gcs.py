@@ -334,6 +334,9 @@ def _generation_param(generation: int | None) -> dict[str, str] | None:
 
 
 def _xml_host(bucket: str) -> str:
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789._-"
+    if not bucket or any(char not in allowed for char in bucket):
+        raise ValueError(f"Invalid GCS bucket name: {bucket!r}")
     return f"{bucket}.storage.googleapis.com"
 
 
