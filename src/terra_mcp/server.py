@@ -161,7 +161,7 @@ def _truncate_log_content(content: str, max_chars: int = 25000) -> tuple[str, bo
     return head + truncation_msg + tail, True
 
 
-async def _fetch_gcs_log(gcs_url: str, ctx: Context) -> str | None:
+async def _fetch_gcs_log(gcs_url: str, ctx: Context) -> tuple[str | None, str | None]:
     """Fetch log content from Google Cloud Storage.
 
     Args:
@@ -169,27 +169,31 @@ async def _fetch_gcs_log(gcs_url: str, ctx: Context) -> str | None:
         ctx: FastMCP context for logging
 
     Returns:
-        Log content as string, or None if fetch fails
+        (content, error) with exactly one of them set. A caller must be able to
+        tell a failed fetch from one that was never asked for; an omitted key
+        cannot express that, and a reader seeing only URLs reasonably concludes
+        the fetch was ignored rather than that the object is gone. Terra purges
+        workflow intermediates, so a 404 here is ordinary on old submissions.
     """
     if not gcs_url or not gcs_url.startswith("gs://"):
-        return None
+        return None, f"not a gs:// URL: {gcs_url!r}"
 
     try:
         # Parse GCS URL: gs://bucket/path/to/file
         url_parts = gcs_url[5:].split("/", 1)
         if len(url_parts) != 2:
             await _log_error(ctx, f"Invalid GCS URL format: {gcs_url}")
-            return None
+            return None, f"malformed GCS URL: {gcs_url}"
 
         bucket_name, blob_name = url_parts
 
         content = gcs.read_text(bucket_name, blob_name)
         await ctx.info(f"Successfully fetched log from {gcs_url} ({len(content)} chars)")
-        return content
+        return content, None
 
     except Exception as e:
         await _log_error(ctx, f"Failed to fetch log from {gcs_url}: {type(e).__name__}: {e}")
-        return None
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _build_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1526,7 +1530,12 @@ async def get_workflow_logs(
         - workflow_id: The workflow UUID
         - workflow_name: Name of the workflow
         - status: Workflow execution status
-        - logs: Dictionary mapping task names to their log info (URLs and optionally content)
+        - logs: Dictionary mapping task names to their log info. Each entry has
+          stderr_url / stdout_url, and when fetch_content=True also stderr /
+          stdout. A fetch that failed sets those to null and adds
+          stderr_error / stdout_error with the reason, so "the content is gone"
+          is distinguishable from "content was not requested". Terra purges
+          workflow intermediates, so a 404 is ordinary on old submissions.
         - fetch_content: Whether content was fetched (for clarity)
 
     **SUBWORKFLOWS:**
@@ -1605,7 +1614,7 @@ async def get_workflow_logs(
 
                     # Fetch stderr
                     if stderr_url:
-                        stderr_content = await _fetch_gcs_log(stderr_url, ctx)
+                        stderr_content, stderr_error = await _fetch_gcs_log(stderr_url, ctx)
                         if stderr_content is not None:
                             if truncate:
                                 stderr_content, was_truncated = _truncate_log_content(
@@ -1613,10 +1622,15 @@ async def get_workflow_logs(
                                 )
                                 log_entry["stderr_truncated"] = was_truncated
                             log_entry["stderr"] = stderr_content
+                        else:
+                            # Say so explicitly: an absent key reads as "content
+                            # was never requested", a different problem entirely.
+                            log_entry["stderr"] = None
+                            log_entry["stderr_error"] = stderr_error
 
                     # Fetch stdout
                     if stdout_url:
-                        stdout_content = await _fetch_gcs_log(stdout_url, ctx)
+                        stdout_content, stdout_error = await _fetch_gcs_log(stdout_url, ctx)
                         if stdout_content is not None:
                             if truncate:
                                 stdout_content, was_truncated = _truncate_log_content(
@@ -1624,6 +1638,9 @@ async def get_workflow_logs(
                                 )
                                 log_entry["stdout_truncated"] = was_truncated
                             log_entry["stdout"] = stdout_content
+                        else:
+                            log_entry["stdout"] = None
+                            log_entry["stdout_error"] = stdout_error
 
                 logs_by_task[task_key] = log_entry
 
@@ -1649,6 +1666,84 @@ async def get_workflow_logs(
 
 
 # ===== GCS Read-Only Tools =====
+
+
+async def _get_one_entity(
+    workspace_namespace: str,
+    workspace_name: str,
+    entity_type: str,
+    entity_name: str,
+    columns: list[str] | None,
+    ctx: Context,
+) -> dict[str, Any]:
+    """Fetch exactly one entity by id, shaped like a one-row get_entities page.
+
+    Uses the single-entity endpoint rather than entityQuery's filterTerms,
+    because "does this row exist" must not depend on a substring search: a
+    filter that does not match the id would report a present row as missing,
+    which is how a pre-submission safety check turns into a wrong answer.
+    """
+    await ctx.info(
+        f"Fetching entity '{entity_name}' of type '{entity_type}' from "
+        f"{workspace_namespace}/{workspace_name}"
+    )
+    response = fapi.get_entity(workspace_namespace, workspace_name, entity_type, entity_name)
+
+    if response.status_code == 404:
+        # Absent, not an error: the caller asked whether it is there.
+        await ctx.info(f"No entity '{entity_name}' of type '{entity_type}'")
+        return {
+            "entity_type": entity_type,
+            "count": 0,
+            "entities": [],
+            "page": 1,
+            "page_size": 1,
+            "total_pages": 0,
+            "has_more": False,
+            "total_entities": None,
+            "matching_entities": 0,
+            "columns": columns,
+            "entity_name": entity_name,
+            "note": (
+                f"No row named '{entity_name}' in table '{entity_type}'. A wrong "
+                "entity_type or workspace reports the same way; "
+                "get_workspace_data_tables lists the tables that exist."
+            ),
+        }
+    if response.status_code == 403:
+        raise ToolError(
+            f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+            "You may not have permission to view this workspace."
+        )
+    if response.status_code != 200:
+        await _log_error(ctx, f"FISS API returned status {response.status_code}: {response.text}")
+        raise ToolError(
+            f"Failed to fetch entity '{entity_name}' (HTTP {response.status_code}). "
+            f"Details: {response.text}"
+        )
+
+    entity = response.json()
+    if columns:
+        wanted = set(columns)
+        entity["attributes"] = {
+            name: value
+            for name, value in (entity.get("attributes") or {}).items()
+            if name in wanted
+        }
+
+    return {
+        "entity_type": entity_type,
+        "count": 1,
+        "entities": [entity],
+        "page": 1,
+        "page_size": 1,
+        "total_pages": 1,
+        "has_more": False,
+        "total_entities": None,
+        "matching_entities": 1,
+        "columns": columns,
+        "entity_name": entity_name,
+    }
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
@@ -2712,10 +2807,16 @@ async def get_entities(
     ] = None,
     page: Annotated[int, "1-indexed page number"] = 1,
     page_size: Annotated[int, "Rows per page, 1 to 1000"] = 100,
+    entity_name: Annotated[
+        str | None,
+        "Fetch exactly this one row by its entity name, the table's id column. "
+        "The definitive existence check: an exact lookup, not a text search, and "
+        "a missing row comes back as an empty result rather than an error.",
+    ] = None,
     filter_terms: Annotated[
         str | None,
-        "Space-separated text matched against the rows, e.g. a sample name. "
-        "Use this to fetch one known row instead of paging to find it.",
+        "Space-separated text matched against the rows. A substring search, so "
+        "use entity_name when you know the exact id you want.",
     ] = None,
     max_response_bytes: Annotated[
         int,
@@ -2732,6 +2833,10 @@ async def get_entities(
     can be thousands of rows by a hundred-plus columns, which neither Terra nor
     a context window handles well:
 
+    0. Checking whether one specific row exists, or reading it? Pass
+       `entity_name`. That is an exact lookup by the table's id, so an empty
+       result means the row genuinely is not there. Never conclude that from a
+       page of results or from `filter_terms`, which is a substring search.
     1. Call get_workspace_data_tables first. It reports each table's row count
        and its column names.
     2. Pass `columns` with only the attributes you need. This is the difference
@@ -2752,6 +2857,8 @@ async def get_entities(
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         entity_type: The entity type to retrieve (matches data table name)
+        entity_name: Exact entity id to fetch. Returns 0 or 1 rows and ignores
+            page, page_size and filter_terms.
         columns: Attribute names to include. None returns all attributes.
         page: 1-indexed page number (default 1)
         page_size: Rows per page, 1 to 1000 (default 100)
@@ -2783,6 +2890,11 @@ async def get_entities(
         if not 1 <= page_size <= MAX_ENTITY_PAGE_SIZE:
             raise ToolError(
                 f"page_size must be between 1 and {MAX_ENTITY_PAGE_SIZE}, got {page_size}"
+            )
+
+        if entity_name:
+            return await _get_one_entity(
+                workspace_namespace, workspace_name, entity_type, entity_name, columns, ctx
             )
 
         await ctx.info(

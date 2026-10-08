@@ -28,7 +28,11 @@ context risk:
   `columns`, so you can choose without fetching a row.
 - Pass `columns=[...]` with only what you need. Measured on a real 163-attribute
   table, one page of 100 rows is ~1 MB with every column and ~28 KB with two.
-- Looking for specific rows? `filter_terms="<text>"` beats paging to find them.
+- Reading or checking one known row? `entity_name="<id>"` is an exact lookup
+  and returns a single row. `filter_terms="<text>"` is a substring search,
+  useful for narrowing but not for proving a row is absent.
+- A page of 1,000 rows can exceed the cap on its own when the values are long
+  GCS paths; 500 is a practical ceiling on a table of file paths.
 - Page deliberately with `page` / `page_size` and stop when `has_more` is false
   or you have enough. `total_pages` and `matching` are in every response.
 - A page over `max_response_bytes` (250 KB default) is refused with the measured

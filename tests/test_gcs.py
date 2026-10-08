@@ -426,9 +426,12 @@ class TestToolsOnXmlBackend:
 
         xml(FakeResponse(content=b"task failed: exit 1\n"))
 
-        content = await terra_server._fetch_gcs_log("gs://fc-bucket/logs/stderr", AsyncMock())
+        content, error = await terra_server._fetch_gcs_log(
+            "gs://fc-bucket/logs/stderr", AsyncMock()
+        )
 
         assert content == "task failed: exit 1\n"
+        assert error is None
 
     @pytest.mark.asyncio
     async def test_access_denied_names_the_host_to_allowlist(self, xml):

@@ -78,6 +78,10 @@ All planned tools have been successfully implemented following test-driven devel
 4. ✅ `get_entities` - Read one page of rows from a Terra data table
    - Wraps `fapi.get_entities_query` (the `entityQuery` endpoint), **not**
      `fapi.get_entities` (issue #15)
+   - `entity_name` does an exact single-row lookup via `fapi.get_entity`, which
+     is the only correct way to answer "does this row exist": `filter_terms` is
+     a substring search, so a miss does not prove absence, and a missing row
+     returns an empty result rather than an error
    - `columns=[...]` selects attributes (maps to the API's `fields`), `page` and
      `page_size` (max 1000) paginate, `filter_terms` text-matches rows
    - Response carries `total_pages`, `has_more`, `total_entities` and

@@ -27,19 +27,23 @@ Check the `methodRepoMethod` section for:
 
 `get_entities` returns **one page** (100 rows by default), so never use a bare
 call to decide whether an entity exists: on a table with more rows than one
-page, a real entity looks missing. Look it up by name instead, and ask only for
-the attributes you are about to check.
+page, a real entity looks missing. Use `entity_name`, which is an exact lookup
+by the table's id, and ask only for the attributes you are about to check.
 
 ```
 get_entities(
     workspace_namespace, workspace_name, entity_type,
-    filter_terms="<entity_name>",
+    entity_name="<entity_name>",
     columns=["<attribute>", "<attribute>"],
 )
 ```
 
+Do not use `filter_terms` for this. It is a substring search over the row, so a
+miss does not mean the entity is absent. `entity_name` returns exactly 0 or 1
+rows, and 0 is a real answer rather than an error.
+
 Confirm from the response:
-- `matching` is 1 or more, and the row you wanted is in `entities`
+- `count` is 1, and the row is in `entities`
 - The attributes you need are populated
 - File paths (GCS URLs) look right
 
@@ -106,7 +110,7 @@ The `use_callcache` parameter (default: True) enables Cromwell call caching:
 ## Common Issues and Solutions
 
 ### Issue: "Entity not found"
-- Verify the entity exists: `get_entities(..., filter_terms="<entity_name>")` and check `matching` is 1 or more. A bare `get_entities(...)` only returns the first page, so it cannot tell you an entity is absent.
+- Verify the entity exists: `get_entities(..., entity_name="<entity_name>")` and check `count` is 1. A bare `get_entities(...)` returns only the first page, so it cannot tell you an entity is absent, and `filter_terms` is a substring search rather than an id lookup.
 - Check entity type matches `rootEntityType` in method config
 - Ensure entity name is spelled correctly
 

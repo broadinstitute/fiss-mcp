@@ -2013,12 +2013,14 @@ class TestGCSLogFetching:
         ctx = AsyncMock()
 
         # Test non-GCS URL
-        result = await _fetch_gcs_log("http://example.com/log.txt", ctx)
-        assert result is None
+        content, error = await _fetch_gcs_log("http://example.com/log.txt", ctx)
+        assert content is None
+        assert "not a gs:// URL" in error
 
         # Test malformed GCS URL
-        result = await _fetch_gcs_log("gs://bucket-only", ctx)
-        assert result is None
+        content, error = await _fetch_gcs_log("gs://bucket-only", ctx)
+        assert content is None
+        assert "malformed GCS URL" in error
 
     @pytest.mark.asyncio
     async def test_fetch_gcs_log_success(self):
@@ -2037,9 +2039,10 @@ class TestGCSLogFetching:
         ctx = AsyncMock()
 
         with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
-            result = await _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
+            content, error = await _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
 
-            assert result == "Log content here"
+            assert content == "Log content here"
+            assert error is None
             mock_client.bucket.assert_called_once_with("my-bucket")
             mock_bucket.blob.assert_called_once_with("path/to/log.txt")
 
@@ -2056,9 +2059,10 @@ class TestGCSLogFetching:
         ctx = AsyncMock()
 
         with patch("terra_mcp.gcs.storage.Client", return_value=mock_client):
-            result = await _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
+            content, error = await _fetch_gcs_log("gs://my-bucket/path/to/log.txt", ctx)
 
-            assert result is None
+            assert content is None
+            assert "GCS error" in error  # the reason reaches the caller, not just the log
             # Verify error was logged
             ctx.error.assert_called()
 
@@ -5437,3 +5441,132 @@ class TestSingleModuleCopy:
         )
         # no second copy, and the instance that serves saw the flag
         assert out == "False True"
+
+
+class TestExactEntityLookup:
+    """entity_name is the definitive existence check (PR #17 live testing)."""
+
+    @pytest.mark.asyncio
+    async def test_uses_the_single_entity_endpoint_not_a_text_search(self):
+        row = MagicMock(status_code=200)
+        row.json.return_value = _sample("3D7", aligned_bam="gs://b/3D7.bam", tissue="blood")
+
+        with (
+            patch("terra_mcp.server.fapi.get_entity", return_value=row) as one,
+            patch("terra_mcp.server.fapi.get_entities_query") as query,
+        ):
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), entity_name="3D7"
+            )
+
+        one.assert_called_once_with("ns", "ws", "sample", "3D7")
+        query.assert_not_called()  # a substring search cannot answer "does it exist"
+        assert result["count"] == 1
+        assert result["matching_entities"] == 1
+        assert result["entities"][0]["name"] == "3D7"
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_missing_row_is_an_empty_result_not_an_error(self):
+        """An existence check needs a clean no, not an exception."""
+        missing = MagicMock(status_code=404)
+
+        with patch("terra_mcp.server.fapi.get_entity", return_value=missing):
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), entity_name="not-a-sample"
+            )
+
+        assert result["count"] == 0
+        assert result["entities"] == []
+        assert result["matching_entities"] == 0
+        assert "get_workspace_data_tables" in result["note"]
+
+    @pytest.mark.asyncio
+    async def test_columns_narrow_the_single_row(self):
+        row = MagicMock(status_code=200)
+        row.json.return_value = _sample(
+            "3D7", aligned_bam="gs://b/3D7.bam", aligned_bai="gs://b/3D7.bai", tissue="blood"
+        )
+
+        with patch("terra_mcp.server.fapi.get_entity", return_value=row):
+            result = await terra_server.get_entities(
+                "ns", "ws", "sample", AsyncMock(), entity_name="3D7", columns=["aligned_bam"]
+            )
+
+        assert result["entities"][0]["attributes"] == {"aligned_bam": "gs://b/3D7.bam"}
+        assert result["columns"] == ["aligned_bam"]
+
+    @pytest.mark.asyncio
+    async def test_access_denied_is_still_an_error(self):
+        from fastmcp.exceptions import ToolError
+
+        denied = MagicMock(status_code=403)
+
+        with patch("terra_mcp.server.fapi.get_entity", return_value=denied):
+            with pytest.raises(ToolError, match="Access denied"):
+                await terra_server.get_entities(
+                    "ns", "ws", "sample", AsyncMock(), entity_name="3D7"
+                )
+
+
+class TestLogFetchFailureIsVisible:
+    """A purged log must not look like content that was never requested."""
+
+    @staticmethod
+    def _metadata():
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "id": "wf-1",
+            "workflowName": "FilterVcfForHmmIBD",
+            "status": "Failed",
+            "calls": {
+                "FilterVcfForHmmIBD.t_01_Filter": [
+                    {
+                        "shardIndex": -1,
+                        "attempt": 1,
+                        "executionStatus": "Failed",
+                        "stderr": "gs://fc-bucket/submissions/intermediates/x/stderr",
+                        "stdout": "gs://fc-bucket/submissions/intermediates/x/stdout",
+                    }
+                ]
+            },
+        }
+        return mock_response
+
+    @pytest.mark.asyncio
+    async def test_purged_logs_report_the_reason(self):
+        from google.cloud.exceptions import NotFound
+
+        from terra_mcp import gcs as gcs_module
+
+        def gone(*_args, **_kwargs):
+            raise NotFound("gs://fc-bucket/... not found")
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=self._metadata()):
+            with patch.dict(gcs_module._IMPL["xml"], {"read_text": gone}):
+                gcs_module.set_backend("xml")
+                result = await terra_server.get_workflow_logs(
+                    "ns", "ws", "sub-1", "wf-1", AsyncMock(), fetch_content=True
+                )
+
+        entry = next(iter(result["logs"].values()))
+        assert entry["stderr"] is None
+        assert "NotFound" in entry["stderr_error"]
+        assert entry["stdout"] is None
+        assert "NotFound" in entry["stdout_error"]
+        assert result["fetch_content"] is True
+
+    @pytest.mark.asyncio
+    async def test_successful_fetch_has_no_error_key(self):
+        from terra_mcp import gcs as gcs_module
+
+        with patch("terra_mcp.server.fapi.get_workflow_metadata", return_value=self._metadata()):
+            with patch.dict(gcs_module._IMPL["xml"], {"read_text": lambda *a, **k: "boom\n"}):
+                gcs_module.set_backend("xml")
+                result = await terra_server.get_workflow_logs(
+                    "ns", "ws", "sub-1", "wf-1", AsyncMock(), fetch_content=True
+                )
+
+        entry = next(iter(result["logs"].values()))
+        assert entry["stderr"] == "boom\n"
+        assert "stderr_error" not in entry
