@@ -10,4 +10,4 @@ instances, two skills providers, and an imported copy whose ALLOW_WRITES never
 sees the command-line flag. Import `terra_mcp.server` directly if you need it.
 """
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
