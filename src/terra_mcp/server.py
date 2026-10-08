@@ -2069,15 +2069,30 @@ async def download_gcs_file(
                 os.replace(temp_path, local_path)
             else:
                 # os.replace would silently clobber a file that appeared during
-                # the transfer; a hard link fails instead, and the temp file is
-                # a sibling so it is always on the same filesystem.
+                # the transfer, so publish in a way that fails if the
+                # destination now exists.
+                raced = ToolError(
+                    f"Local path '{local_path}' was created while the download was "
+                    "in progress. Pass overwrite=True to replace it."
+                )
                 try:
                     os.link(temp_path, local_path)
                 except FileExistsError:
-                    raise ToolError(
-                        f"Local path '{local_path}' was created while the download was "
-                        "in progress. Pass overwrite=True to replace it."
-                    ) from None
+                    raise raced from None
+                except OSError:
+                    # Hard links are unavailable on SMB, exFAT and some FUSE
+                    # mounts, where the destination may well live. An exclusive
+                    # create plus a copy keeps the same no-clobber guarantee.
+                    try:
+                        destination = os.open(
+                            local_path,
+                            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                            0o666 & ~umask,
+                        )
+                    except FileExistsError:
+                        raise raced from None
+                    with open(destination, "wb") as target, open(temp_path, "rb") as source:
+                        shutil.copyfileobj(source, target)
                 os.remove(temp_path)
         except BaseException:
             if os.path.exists(temp_path):

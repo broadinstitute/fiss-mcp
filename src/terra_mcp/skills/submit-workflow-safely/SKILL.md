@@ -25,16 +25,28 @@ Check the `methodRepoMethod` section for:
 
 ### 2. Verify Entity Data is Correct
 
+`get_entities` returns **one page** (100 rows by default), so never use a bare
+call to decide whether an entity exists: on a table with more rows than one
+page, a real entity looks missing. Look it up by name instead, and ask only for
+the attributes you are about to check.
+
 ```
-get_entities(workspace_namespace, workspace_name, entity_type)
+get_entities(
+    workspace_namespace, workspace_name, entity_type,
+    filter_terms="<entity_name>",
+    columns=["<attribute>", "<attribute>"],
+)
 ```
 
-Verify:
-- Entity exists and has expected attributes
-- File paths (GCS URLs) are valid
-- Required attributes are populated
+Confirm from the response:
+- `matching` is 1 or more, and the row you wanted is in `entities`
+- The attributes you need are populated
+- File paths (GCS URLs) look right
 
-**Caution:** For large tables (100+ entities), consider whether you need all data. See the manage-context-size skill.
+Attribute names come from `get_workspace_data_tables`, which lists each table's
+`columns` alongside its row count. Omitting `columns` returns every attribute
+and is refused outright above `max_response_bytes` on a wide table; see the
+manage-context-size skill.
 
 ### 3. Verify Input Mappings are Configured
 
@@ -94,7 +106,7 @@ The `use_callcache` parameter (default: True) enables Cromwell call caching:
 ## Common Issues and Solutions
 
 ### Issue: "Entity not found"
-- Verify the entity exists: `get_entities(...)`
+- Verify the entity exists: `get_entities(..., filter_terms="<entity_name>")` and check `matching` is 1 or more. A bare `get_entities(...)` only returns the first page, so it cannot tell you an entity is absent.
 - Check entity type matches `rootEntityType` in method config
 - Ensure entity name is spelled correctly
 

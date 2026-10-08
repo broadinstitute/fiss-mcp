@@ -5302,6 +5302,71 @@ class TestDownloadPublishing:
         assert result["bytes_downloaded"] == 100
 
 
+class TestPublishWithoutHardLinks:
+    """SMB, exFAT and some FUSE mounts reject os.link; publishing must still work."""
+
+    def _info(self):
+        return TestDownloadPublishing()._info()
+
+    def _stub(self, monkeypatch, payload=b"y" * 100):
+        from terra_mcp import gcs as gcs_module
+
+        def write_all(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(payload)
+
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "download", write_all)
+        gcs_module.set_backend("xml")
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_an_exclusive_create(self, tmp_path, monkeypatch):
+        import stat
+
+        self._stub(monkeypatch)
+        monkeypatch.setattr(
+            os, "link", lambda *a, **k: (_ for _ in ()).throw(OSError(1, "Operation not permitted"))
+        )
+        dest = tmp_path / "out.bin"
+
+        result = await terra_server.download_gcs_file(
+            "gs://fc-bucket/f.bin", str(dest), AsyncMock()
+        )
+
+        assert dest.read_bytes() == b"y" * 100
+        assert result["bytes_downloaded"] == 100
+        umask = os.umask(0)
+        os.umask(umask)
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o666 & ~umask
+        assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]
+
+    @pytest.mark.asyncio
+    async def test_fallback_still_refuses_an_existing_destination(self, tmp_path, monkeypatch):
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp import gcs as gcs_module
+
+        dest = tmp_path / "out.bin"
+
+        def write_then_race(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(b"y" * 100)
+            dest.write_bytes(b"first")
+
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "download", write_then_race)
+        gcs_module.set_backend("xml")
+        monkeypatch.setattr(
+            os, "link", lambda *a, **k: (_ for _ in ()).throw(OSError(1, "Operation not permitted"))
+        )
+
+        with pytest.raises(ToolError, match="created while the download was in progress"):
+            await terra_server.download_gcs_file("gs://fc-bucket/f.bin", str(dest), AsyncMock())
+
+        assert dest.read_bytes() == b"first"
+        assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]
+
+
 class TestLogErrorReachesStderrFirst:
     @pytest.mark.asyncio
     async def test_stderr_record_survives_a_dead_client(self, caplog):
@@ -5331,3 +5396,44 @@ class TestEmptyColumnsIsHonest:
 
         assert query.call_args.kwargs["fields"] is None
         assert result["columns"] is None  # not [], which would claim a selection
+
+
+class TestSingleModuleCopy:
+    """A script launch must not load server.py twice (PR #17 review, must-fix).
+
+    server.py imports terra_mcp.gcs, which loads the package. If the package
+    re-exported `mcp`, the module would also be imported as terra_mcp.server,
+    giving two FastMCP instances, two skills providers, and an imported copy
+    whose ALLOW_WRITES never sees --allow-writes. Module state is global, so
+    these run in subprocesses.
+    """
+
+    @staticmethod
+    def _run(code):
+        import os as _os
+        import subprocess
+        import sys
+
+        env = dict(_os.environ, PYTHONPATH="src")
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        return result.stdout.strip()
+
+    def test_importing_the_package_does_not_import_the_server(self):
+        out = self._run("import sys, terra_mcp; print('terra_mcp.server' in sys.modules)")
+        assert out == "False"
+
+    def test_script_launch_loads_one_copy_and_honours_the_flag(self):
+        out = self._run(
+            "import contextlib, io, runpy, sys\n"
+            "sys.argv = ['server.py', '--allow-writes']\n"
+            "import fastmcp\n"
+            "fastmcp.FastMCP.run = lambda self, *a, **k: None\n"
+            "with contextlib.redirect_stderr(io.StringIO()):\n"
+            "    g = runpy.run_path('src/terra_mcp/server.py', run_name='__main__')\n"
+            "print('terra_mcp.server' in sys.modules, g['ALLOW_WRITES'])"
+        )
+        # no second copy, and the instance that serves saw the flag
+        assert out == "False True"

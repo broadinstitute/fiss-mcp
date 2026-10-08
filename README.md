@@ -118,14 +118,13 @@ Skills contain step-by-step procedures, best practices, and anti-patterns.
 Once configured, you can interact with Terra.Bio through Claude:
 
 ```
-Human: List all my Terra workspaces
+Human: Find my malaria workspaces
 
-Claude: I'll list your accessible Terra workspaces.
-[Claude calls list_workspaces tool]
-You have access to 3 workspaces:
-1. broad-firecloud-testing/demo-workspace (created by user@broad.io on 2024-01-15)
-2. my-billing/analysis-workspace (created by user@broad.io on 2024-02-01)
-...
+Claude: I'll search your accessible Terra workspaces.
+[Claude calls list_workspaces with name_contains="malaria"]
+2 of your 2,234 accessible workspaces match:
+1. broad-firecloud-dsde-methods/sr-malaria (created by user@example.org on 2024-01-15)
+2. my-billing/malaria-analysis (created by user@example.org on 2024-02-01)
 ```
 
 ```

@@ -14,10 +14,27 @@ These operations can exhaust your context window:
 |-----------|------------|----------------|
 | `get_job_metadata` (full) | **CRITICAL** | 100K+ tokens per workflow |
 | `get_workflow_logs` with many shards | **HIGH** | 25K+ tokens per task log |
-| `get_entities` for large tables | **HIGH** | 10K+ tokens for 100 entities |
+| `get_entities` without `columns` on a wide table | **MEDIUM** | ~1 MB per 100 rows at 163 attributes; refused above `max_response_bytes` (250 KB) |
 | `get_submission_status` with `include_inputs=True` | **MEDIUM** | 30K+ tokens for 9 workflows |
 
 ## Safe Patterns
+
+### 0. Narrow Data Table Reads Before You Make Them
+
+`get_entities` is paginated and column-selectable, so it does not have to be a
+context risk:
+
+- `get_workspace_data_tables` first: it reports each table's row count and its
+  `columns`, so you can choose without fetching a row.
+- Pass `columns=[...]` with only what you need. Measured on a real 163-attribute
+  table, one page of 100 rows is ~1 MB with every column and ~28 KB with two.
+- Looking for specific rows? `filter_terms="<text>"` beats paging to find them.
+- Page deliberately with `page` / `page_size` and stop when `has_more` is false
+  or you have enough. `total_pages` and `matching` are in every response.
+- A page over `max_response_bytes` (250 KB default) is refused with the measured
+  size rather than returned, so an oversized request fails loudly instead of
+  consuming the window.
+
 
 ### 1. Always Use Summary Mode for Metadata
 

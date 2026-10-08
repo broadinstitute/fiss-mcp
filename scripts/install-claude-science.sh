@@ -202,7 +202,10 @@ if [[ -z "$CREDENTIALS" ]]; then
   fi
 fi
 [[ -f "$CREDENTIALS" ]] || die "Credentials file not found: $CREDENTIALS"
-cp "$CREDENTIALS" "$ADC_DEST"
+# Create it owner-only from the start: a plain cp would leave the refresh token
+# at the umask default for the moment before chmod, and cp onto an existing file
+# keeps that file's mode, so the chmod is still needed afterwards.
+( umask 077; cp "$CREDENTIALS" "$ADC_DEST" )
 chmod 600 "$ADC_DEST"
 ok "copied to $ADC_DEST (mode 600)"
 warn "This file contains a long-lived token for your Google account. Treat it like a password."

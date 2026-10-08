@@ -22,6 +22,9 @@ classifiers = [
 dependencies = [
     "fastmcp>=3.0.0b1",  # Skills require 3.x; using beta until stable release
     "firecloud>=0.16.39",
+    # Retry.with_timeout, used to bound the GCS backend probe, is api-core >= 2.3;
+    # google-cloud-storage's own floor can resolve to something older.
+    "google-api-core>=2.3.0",
     "google-auth>=2.0.0",  # token minting for the GCS XML backend
     "google-cloud-batch>=0.17.0",
     "google-cloud-storage>=2.0.0",
