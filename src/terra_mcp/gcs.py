@@ -40,6 +40,7 @@ import google.auth.transport.requests
 import requests
 from google.cloud import storage
 from google.cloud.exceptions import Forbidden, NotFound
+from google.cloud.storage.retry import DEFAULT_RETRY
 
 logger = logging.getLogger(__name__)
 
@@ -66,22 +67,32 @@ _PLACEHOLDER_PROJECT = "terra-mcp-no-project"
 # starting and ending alphanumeric; anything else is rejected outright.
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$")
 
+# google-cloud-storage's DEFAULT_RETRY retries requests.ConnectionError for a
+# 120 s deadline, and requests.exceptions.ProxyError is a ConnectionError, so a
+# sandbox that refuses the host would be retried for two minutes: far longer
+# than any MCP client waits, which means `auto` could never fall back in time.
+# While the backend is unresolved every JSON call is a probe, so bound it; once
+# latched, the library default applies.
+PROBE_TIMEOUT_SECONDS = 10
+
 _requested_backend: str = "auto"
 _active_backend: str | None = None
 _session: requests.Session | None = None
 _credentials: Any = None
+_json_client_instance: storage.Client | None = None
 
 
 # ===== Backend selection =====
 
 
 def set_backend(name: str) -> None:
-    """Select the backend, resetting any cached auto-detection result."""
-    global _requested_backend, _active_backend
+    """Select the backend, resetting cached clients and any detection result."""
+    global _requested_backend, _active_backend, _json_client_instance
     if name not in BACKENDS:
         raise ValueError(f"Unknown GCS backend {name!r}; expected one of {BACKENDS}")
     _requested_backend = name
     _active_backend = None if name == "auto" else name
+    _json_client_instance = None
 
 
 def active_backend() -> str:
@@ -164,8 +175,11 @@ def _call(op: str, *args: Any, **kwargs: Any) -> Any:
             type(exc).__name__,
             exc,
         )
+        result = _IMPL["xml"][op](*args, **kwargs)
+        # Latch only now: a transient connection error must not permanently
+        # degrade the session on the strength of one failed JSON call.
         _active_backend = "xml"
-        return _IMPL["xml"][op](*args, **kwargs)
+        return result
     _active_backend = "json"
     return result
 
@@ -222,8 +236,15 @@ def download(bucket: str, key: str, local_path: str, generation: int | None = No
 # ===== JSON backend (google-cloud-storage) =====
 
 
+def _json_retry():
+    """Retry policy for a JSON call, bounded while auto-detection is pending."""
+    if _active_backend is None:
+        return DEFAULT_RETRY.with_timeout(PROBE_TIMEOUT_SECONDS)
+    return DEFAULT_RETRY
+
+
 def _json_client() -> storage.Client:
-    """Build a storage.Client, tolerating an undeterminable project.
+    """Return a cached storage.Client, tolerating an undeterminable project.
 
     ``storage.Client()`` raises ``EnvironmentError: Project was not passed and
     could not be determined from the environment`` when ADC is a user
@@ -231,18 +252,24 @@ def _json_client() -> storage.Client:
     buckets that are not requester-pays never use the project, so a placeholder
     is harmless and beats failing outright.
     """
+    global _json_client_instance
+    if _json_client_instance is not None:
+        return _json_client_instance
+
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
     if project:
-        return storage.Client(project=project)
+        _json_client_instance = storage.Client(project=project)
+        return _json_client_instance
     try:
-        return storage.Client()
+        _json_client_instance = storage.Client()
     except OSError as exc:  # EnvironmentError is an alias of OSError
         logger.info(
             "No GCS project could be determined (%s); continuing with a placeholder. "
             "Set GOOGLE_CLOUD_PROJECT to silence this.",
             exc,
         )
-        return storage.Client(project=_PLACEHOLDER_PROJECT)
+        _json_client_instance = storage.Client(project=_PLACEHOLDER_PROJECT)
+    return _json_client_instance
 
 
 def _json_list_objects(
@@ -254,6 +281,7 @@ def _json_list_objects(
         prefix=prefix if prefix else None,
         max_results=max_results + 1,
         delimiter=delimiter,
+        retry=_json_retry(),
     )
     objects: list[dict[str, Any]] = []
     truncated = False
@@ -275,7 +303,7 @@ def _json_list_objects(
 
 
 def _json_stat_object(bucket: str, key: str) -> dict[str, Any] | None:
-    blob = _json_client().bucket(bucket).get_blob(key)
+    blob = _json_client().bucket(bucket).get_blob(key, retry=_json_retry())
     if blob is None:
         return None
     return {
@@ -297,16 +325,16 @@ def _json_read_range(
     bucket: str, key: str, start: int, end: int | None, generation: int | None = None
 ) -> bytes:
     blob = _json_client().bucket(bucket).blob(key, generation=generation)
-    return blob.download_as_bytes(start=start, end=end, raw_download=True)
+    return blob.download_as_bytes(start=start, end=end, raw_download=True, retry=_json_retry())
 
 
 def _json_read_text(bucket: str, key: str) -> str:
-    return _json_client().bucket(bucket).blob(key).download_as_text()
+    return _json_client().bucket(bucket).blob(key).download_as_text(retry=_json_retry())
 
 
 def _json_download(bucket: str, key: str, local_path: str, generation: int | None = None) -> None:
     blob = _json_client().bucket(bucket).blob(key, generation=generation)
-    blob.download_to_filename(local_path, raw_download=True)
+    blob.download_to_filename(local_path, raw_download=True, retry=_json_retry())
 
 
 # ===== XML backend (per-bucket virtual-hosted hostnames) =====
@@ -334,9 +362,10 @@ def _generation_param(generation: int | None) -> dict[str, str] | None:
 
 
 def _xml_host(bucket: str) -> str:
-    allowed = "abcdefghijklmnopqrstuvwxyz0123456789._-"
-    if not bucket or any(char not in allowed for char in bucket):
-        raise ValueError(f"Invalid GCS bucket name: {bucket!r}")
+    # Validate here too, not only in _xml_request: this function is also called
+    # standalone when building error messages, and one definition of a legal
+    # bucket name is better than two that disagree.
+    validate_bucket(bucket)
     return f"{bucket}.storage.googleapis.com"
 
 
@@ -461,7 +490,10 @@ def _xml_list_objects(
     continuation: str | None = None
 
     while True:
-        params = {"list-type": "2", "max-keys": str(_XML_MAX_KEYS)}
+        # Only fetch what is still wanted; +1 keeps the truncation check below
+        # working, mirroring what the JSON backend asks for.
+        remaining = max(1, max_results - len(objects))
+        params = {"list-type": "2", "max-keys": str(min(remaining + 1, _XML_MAX_KEYS))}
         if prefix:
             params["prefix"] = prefix
         if delimiter:
@@ -561,14 +593,19 @@ def _xml_read_text(bucket: str, key: str) -> str:
 
 
 def _xml_download(bucket: str, key: str, local_path: str, generation: int | None = None) -> None:
-    with _xml_checked(
+    # Enter the response context before checking the status: _xml_checked would
+    # raise on a 403/404/500 before the `with` bound the response, leaking the
+    # unread connection in a long-lived server.
+    response = _xml_request(
         "GET",
         bucket,
         key,
         headers={"Accept-Encoding": "gzip"},
         params=_generation_param(generation),
         stream=True,
-    ) as response:
+    )
+    with response:
+        _xml_raise_for_status(response, bucket, key, read_body=False)
         with open(local_path, "wb") as handle:
             # Undecoded, so the bytes on disk match the stored size the caller
             # checked against. iter_content() would expand a gzip-encoded object.

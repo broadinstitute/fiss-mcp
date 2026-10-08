@@ -64,9 +64,17 @@ async def _log_error(ctx: Context, message: str) -> None:
     one, surfaces only the server's stderr - so an exception reported through
     ctx.error() alone is invisible there. When called from an except block this
     also logs the traceback.
+
+    stderr comes first, and the client call cannot raise past it: ctx.error()
+    fails on a dead session (a client that timed out mid-download, or no active
+    request context), and losing the stderr record in exactly that case would
+    defeat the point of this helper.
     """
-    await ctx.error(message)
     logger.error(message, exc_info=sys.exc_info()[0] is not None)
+    try:
+        await ctx.error(message)
+    except Exception as exc:  # a dead client must not become a second failure
+        logger.debug("could not deliver the error to the MCP client: %s", exc)
 
 
 def _gcs_denied_message(gcs_uri: str) -> str:
@@ -2037,7 +2045,7 @@ async def download_gcs_file(
         # (which a later retry would refuse, or overwrite=True would have
         # already clobbered). Pinned to the generation whose size was checked.
         handle, temp_path = tempfile.mkstemp(
-            dir=parent or None, prefix=f".{os.path.basename(local_path)}.", suffix=".partial"
+            dir=parent, prefix=f".{os.path.basename(local_path)}.", suffix=".partial"
         )
         os.close(handle)
         try:
@@ -2050,7 +2058,27 @@ async def download_gcs_file(
                     "Partial file discarded."
                 )
 
-            os.replace(temp_path, local_path)
+            # mkstemp creates the file 0600. Downloads used to go through a
+            # normal open() and honour the umask, so restore that: a file
+            # fetched into a shared directory has to stay readable there.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(temp_path, 0o666 & ~umask)
+
+            if overwrite:
+                os.replace(temp_path, local_path)
+            else:
+                # os.replace would silently clobber a file that appeared during
+                # the transfer; a hard link fails instead, and the temp file is
+                # a sibling so it is always on the same filesystem.
+                try:
+                    os.link(temp_path, local_path)
+                except FileExistsError:
+                    raise ToolError(
+                        f"Local path '{local_path}' was created while the download was "
+                        "in progress. Pass overwrite=True to replace it."
+                    ) from None
+                os.remove(temp_path)
         except BaseException:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -2731,6 +2759,10 @@ async def get_entities(
         - columns: The column selection applied, or None if all were returned
     """
     try:
+        # An empty list selects nothing, which Terra reads as "every attribute";
+        # normalise so the request and the echoed `columns` field agree.
+        columns = columns or None
+
         if page < 1:
             raise ToolError(f"page must be 1 or greater, got {page}")
         if not 1 <= page_size <= MAX_ENTITY_PAGE_SIZE:

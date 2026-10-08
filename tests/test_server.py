@@ -4,6 +4,7 @@ Basic test suite to verify server initialization, tool registration,
 and error handling with mocked FISS API calls.
 """
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,15 +43,18 @@ class TestServerInitialization:
 
         tree = ast.parse(inspect.getsource(terra_mcp.server))
 
+        # Identity, not line number: two calls on one line, or a ctx.* call
+        # nested as an argument inside a different awaited call, would both look
+        # awaited if this keyed on position.
         awaited = {
-            node.value.lineno
+            id(node.value)
             for node in ast.walk(tree)
             if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
         }
 
         def ctx_calls(root):
             return [
-                node.lineno
+                node
                 for node in ast.walk(root)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
@@ -58,12 +62,15 @@ class TestServerInitialization:
                 and node.func.value.id == "ctx"
             ]
 
-        assert [line for line in ctx_calls(tree) if line not in awaited] == []
+        unawaited = [
+            (call.lineno, call.col_offset) for call in ctx_calls(tree) if id(call) not in awaited
+        ]
+        assert unawaited == []
         in_sync_defs = [
-            (func.name, line)
+            (func.name, call.lineno)
             for func in ast.walk(tree)
             if isinstance(func, ast.FunctionDef)
-            for line in ctx_calls(func)
+            for call in ctx_calls(func)
         ]
         assert in_sync_defs == []
 
@@ -5209,3 +5216,118 @@ class TestSkills:
             assert "#" in content_without_fm, (
                 f"{skill_dir.name}/SKILL.md should have at least one heading"
             )
+
+
+# ===== Hardening from PR review round 2 =====
+
+
+class TestDownloadPublishing:
+    """How the finished file lands at local_path (PR #17 review)."""
+
+    def _info(self, size=100):
+        return {
+            "name": "f.bin",
+            "size": size,
+            "content_type": "application/octet-stream",
+            "md5_hash": "abc==",
+            "crc32c": "def==",
+            "time_created": None,
+            "updated": None,
+            "generation": 7,
+            "metageneration": 1,
+            "storage_class": "STANDARD",
+            "custom_metadata": {},
+        }
+
+    def _stub_download(self, monkeypatch, payload=b"y" * 100):
+        from terra_mcp import gcs as gcs_module
+
+        def write_all(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(payload)
+
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "download", write_all)
+        gcs_module.set_backend("xml")
+
+    @pytest.mark.asyncio
+    async def test_published_file_honours_the_umask(self, tmp_path, monkeypatch):
+        """mkstemp creates 0600; a download used to honour the umask, and must again."""
+        import stat
+
+        self._stub_download(monkeypatch)
+        dest = tmp_path / "out.bin"
+
+        await terra_server.download_gcs_file("gs://fc-bucket/f.bin", str(dest), AsyncMock())
+
+        umask = os.umask(0)
+        os.umask(umask)
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o666 & ~umask
+
+    @pytest.mark.asyncio
+    async def test_destination_appearing_mid_download_is_not_clobbered(self, tmp_path, monkeypatch):
+        """The existence check happens before the transfer, so this is a real race."""
+        from fastmcp.exceptions import ToolError
+
+        from terra_mcp import gcs as gcs_module
+
+        dest = tmp_path / "out.bin"
+
+        def write_then_race(bucket, key, path, generation=None):
+            with open(path, "wb") as handle:
+                handle.write(b"y" * 100)
+            dest.write_bytes(b"someone else got here first")
+
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "stat_object", lambda b, k: self._info())
+        monkeypatch.setitem(gcs_module._IMPL["xml"], "download", write_then_race)
+        gcs_module.set_backend("xml")
+
+        with pytest.raises(ToolError, match="created while the download was in progress"):
+            await terra_server.download_gcs_file("gs://fc-bucket/f.bin", str(dest), AsyncMock())
+
+        assert dest.read_bytes() == b"someone else got here first"
+        assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]  # no temp left
+
+    @pytest.mark.asyncio
+    async def test_overwrite_true_still_replaces(self, tmp_path, monkeypatch):
+        self._stub_download(monkeypatch)
+        dest = tmp_path / "out.bin"
+        dest.write_bytes(b"old")
+
+        result = await terra_server.download_gcs_file(
+            "gs://fc-bucket/f.bin", str(dest), AsyncMock(), overwrite=True
+        )
+
+        assert dest.read_bytes() == b"y" * 100
+        assert result["bytes_downloaded"] == 100
+
+
+class TestLogErrorReachesStderrFirst:
+    @pytest.mark.asyncio
+    async def test_stderr_record_survives_a_dead_client(self, caplog):
+        """The helper exists because Claude Science shows only stderr."""
+        ctx = AsyncMock()
+        ctx.error.side_effect = RuntimeError("session closed")
+
+        with caplog.at_level("ERROR", logger="terra_mcp.server"):
+            await terra_server._log_error(ctx, "the real failure")
+
+        assert "the real failure" in caplog.text  # not lost to the dead client
+
+    @pytest.mark.asyncio
+    async def test_client_is_still_notified_when_it_is_alive(self):
+        ctx = AsyncMock()
+        await terra_server._log_error(ctx, "boom")
+        ctx.error.assert_awaited_once_with("boom")
+
+
+class TestEmptyColumnsIsHonest:
+    @pytest.mark.asyncio
+    async def test_empty_column_list_reports_no_selection(self):
+        mock_response = _entity_page([_sample("s1", a="1")])
+
+        with patch("terra_mcp.server.fapi.get_entities_query", return_value=mock_response) as query:
+            result = await terra_server.get_entities("ns", "ws", "sample", AsyncMock(), columns=[])
+
+        assert query.call_args.kwargs["fields"] is None
+        assert result["columns"] is None  # not [], which would claim a selection

@@ -186,9 +186,12 @@ All planned tools have been successfully implemented following test-driven devel
 20. ✅ `download_gcs_file` - Stream a complete GCS file to local disk
     - Safety: refuses to overwrite existing files unless `overwrite=True`
     - Safety: refuses if download would consume >90% of free disk space unless `skip_disk_check=True`
-    - Safety: transfers to a temp file beside the destination and renames it only
-      after the size matches GCS metadata, so a failed or short transfer never
-      leaves a partial file at `local_path`
+    - Safety: transfers to a temp file beside the destination and publishes it
+      only after the size matches GCS metadata, so a failed or short transfer
+      never leaves a partial file at `local_path`
+    - Publishing honours the umask (`mkstemp` would otherwise leave every
+      download mode 0600) and uses `os.link` when `overwrite=False`, so a file
+      that appears during the transfer is not silently clobbered by `os.replace`
     - Both backends move the object's *stored* bytes (`raw_download` / undecoded
       stream), so a range lines up with the stored length even for an object
       with `Content-Encoding: gzip`; `get_workflow_logs` still decodes text
@@ -312,6 +315,24 @@ and *testing* a new layout, not editing the docs.
   refusal, DNS) switch to XML and latch that for the process. A 403/404 *from
   GCS* means the host is reachable and must not trigger a switch - that
   distinction lives in `gcs._looks_unreachable`.
+- **The probe must be retry-bounded.** `google-cloud-storage`'s `DEFAULT_RETRY`
+  has a 120 s deadline and retries `requests.ConnectionError`, of which
+  `ProxyError` is a subclass, so an unbounded probe would retry a blocked host
+  for two minutes and the MCP client would time out before `auto` ever fell
+  back. While `_active_backend is None`, every JSON call passes
+  `DEFAULT_RETRY.with_timeout(PROBE_TIMEOUT_SECONDS)`; afterwards the library
+  default applies. Measured: the bounded policy gives up in 8 s over 5 attempts.
+- **Detection runs off the `__cause__` chain.** A bounded retry raises
+  `google.api_core.exceptions.RetryError`, *not* the `ProxyError`, so
+  `_looks_unreachable` has to walk `__cause__` / `__context__`. Break that and
+  `auto` silently stops falling back.
+- **The backend latches only after the XML call succeeds.** Latching on the
+  strength of a failed JSON call alone would let one transient reset degrade a
+  whole session to XML semantics (null `time_created`, no listing
+  `content_type`, ETag-derived `md5_hash`).
+- **The JSON client is cached** in a module global and cleared by
+  `set_backend()`; `tests/conftest.py` resets that state around every test,
+  since almost every test patches `storage.Client`.
 - **Deliberate XML-side gaps**: no `time_created` (not reported), no
   `content_type` in listings, and listing `md5_hash` comes from the ETag so it
   is `None` for composite objects. Requester-pays buckets are unsupported in

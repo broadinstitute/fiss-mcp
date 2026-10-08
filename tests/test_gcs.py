@@ -710,3 +710,199 @@ class TestDownloadIsAtomic:
         assert dest.read_bytes() == payload
         assert result["bytes_downloaded"] == 100
         assert [p.name for p in tmp_path.iterdir()] == ["out.bam"]
+
+
+# ===== Hardening from PR review round 2 =====
+
+
+class TestProbeRetryIsBounded:
+    """google-cloud-storage retries a proxy refusal for 120 s by default.
+
+    That is longer than an MCP client waits, so an unbounded probe could never
+    fall back to XML in time (PR #17 review, must-fix).
+    """
+
+    def test_probe_uses_a_bounded_retry_while_unresolved(self):
+        gcs.set_backend("auto")
+        assert gcs._active_backend is None
+        retry = gcs._json_retry()
+        assert retry._timeout == gcs.PROBE_TIMEOUT_SECONDS
+
+    def test_latched_backend_uses_the_library_default(self):
+        from google.cloud.storage.retry import DEFAULT_RETRY
+
+        gcs.set_backend("json")
+        assert gcs._json_retry() is DEFAULT_RETRY
+
+    def test_the_bounded_retry_still_covers_proxy_errors(self):
+        """Bounding the deadline must not stop it retrying a transient blip."""
+        gcs.set_backend("auto")
+        retry = gcs._json_retry()
+        assert retry._predicate(requests.exceptions.ProxyError("Tunnel connection failed"))
+
+    def test_stat_object_passes_the_retry_to_the_client(self, monkeypatch):
+        seen = {}
+
+        class FakeBucket:
+            def get_blob(self, key, retry=None):
+                seen["retry"] = retry
+                return None
+
+        monkeypatch.setattr(
+            gcs, "_json_client", lambda: type("C", (), {"bucket": lambda self, n: FakeBucket()})()
+        )
+        gcs.set_backend("json")
+        assert gcs.stat_object("fc-bucket", "f.txt") is None
+        assert seen["retry"] is not None
+
+
+class TestLatchOnlyAfterSuccess:
+    """A transient connection error must not degrade the whole session."""
+
+    def test_a_failed_xml_fallback_leaves_the_backend_unresolved(self, monkeypatch):
+        monkeypatch.setitem(
+            gcs._IMPL["json"],
+            "stat_object",
+            lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ConnectionError("reset")),
+        )
+        monkeypatch.setitem(
+            gcs._IMPL["xml"],
+            "stat_object",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("xml also down")),
+        )
+        gcs.set_backend("auto")
+
+        with pytest.raises(RuntimeError, match="xml also down"):
+            gcs.stat_object("fc-bucket", "f.txt")
+
+        # Unresolved, so the next call re-probes JSON rather than staying on XML
+        assert gcs._active_backend is None
+
+    def test_a_successful_xml_fallback_does_latch(self, monkeypatch):
+        monkeypatch.setitem(
+            gcs._IMPL["json"],
+            "stat_object",
+            lambda *a, **k: (_ for _ in ()).throw(
+                requests.exceptions.ProxyError("not on the allowlist")
+            ),
+        )
+        monkeypatch.setitem(gcs._IMPL["xml"], "stat_object", lambda *a, **k: {"size": 1})
+        gcs.set_backend("auto")
+
+        assert gcs.stat_object("fc-bucket", "f.txt") == {"size": 1}
+        assert gcs.active_backend() == "xml"
+
+
+class TestJsonClientIsCached:
+    def test_one_client_serves_repeated_operations(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        built = []
+
+        def client(project=None):
+            built.append(project)
+            return object()
+
+        monkeypatch.setattr(gcs.storage, "Client", client)
+
+        first = gcs._json_client()
+        second = gcs._json_client()
+
+        assert first is second
+        assert len(built) == 1
+
+    def test_set_backend_clears_the_cache(self, monkeypatch):
+        monkeypatch.setattr(gcs.storage, "Client", lambda project=None: object())
+        first = gcs._json_client()
+        gcs.set_backend("auto")
+        assert gcs._json_client() is not first
+
+
+class TestListRequestsOnlyWhatIsNeeded:
+    def test_max_keys_tracks_max_results(self, xml):
+        session = xml(listing(contents=[("a", 1)]))
+
+        gcs.list_objects("fc-bucket", "", 10, None)
+
+        assert session.calls[0]["params"]["max-keys"] == "11"  # max_results + 1
+
+    def test_max_keys_is_capped_at_the_api_limit(self, xml):
+        session = xml(listing(contents=[("a", 1)]))
+
+        gcs.list_objects("fc-bucket", "", 5000, None)
+
+        assert session.calls[0]["params"]["max-keys"] == "1000"
+
+    def test_later_pages_ask_only_for_the_remainder(self, xml):
+        session = xml(
+            listing(contents=[("a", 1), ("b", 2)], truncated=True, token="T"),
+            listing(contents=[("c", 3)]),
+        )
+
+        gcs.list_objects("fc-bucket", "", 5, None)
+
+        assert session.calls[0]["params"]["max-keys"] == "6"
+        assert session.calls[1]["params"]["max-keys"] == "4"  # 3 remaining + 1
+
+
+class TestStreamedErrorsAreClosed:
+    def test_a_failed_download_closes_the_response(self, xml, tmp_path):
+        response = FakeResponse(status_code=500, content=b"boom")
+        xml(response)
+
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            gcs.download("fc-bucket", "f.bin", str(tmp_path / "out"))
+
+        assert response.closed is True
+
+    def test_a_missing_object_closes_the_response(self, xml, tmp_path):
+        response = FakeResponse(status_code=404)
+        xml(response)
+
+        with pytest.raises(NotFound):
+            gcs.download("fc-bucket", "f.bin", str(tmp_path / "out"))
+
+        assert response.closed is True
+
+
+class TestHostValidationIsNotDuplicated:
+    def test_xml_host_applies_the_same_rules_as_validate_bucket(self):
+        """The inline check added in dddedf4 accepted names validate_bucket rejects."""
+        for bucket in ("a", "-x-", "ab"):
+            with pytest.raises(ValueError, match="Invalid GCS bucket name"):
+                gcs._xml_host(bucket)
+        assert gcs._xml_host("fc-bucket") == "fc-bucket.storage.googleapis.com"
+
+
+class TestBoundedProbeStillTriggersFallback:
+    """The bounded retry changes the exception type reaching _looks_unreachable.
+
+    google-api-core raises RetryError once the deadline passes, not the
+    ProxyError itself, so detection relies on the __cause__ chain. If that ever
+    breaks, `auto` silently stops falling back.
+    """
+
+    def test_retry_error_wrapping_a_proxy_error_is_recognised(self):
+        from google.api_core.exceptions import RetryError
+
+        cause = requests.exceptions.ProxyError(
+            "Tunnel connection failed: 403 Forbidden (host storage.googleapis.com "
+            "not on the allowlist)"
+        )
+        try:
+            raise RetryError("Timeout of 10.0s exceeded", cause) from cause
+        except RetryError as exc:
+            assert gcs._looks_unreachable(exc) is True
+
+    def test_auto_falls_back_when_the_probe_exhausts_its_deadline(self, monkeypatch):
+        from google.api_core.exceptions import RetryError
+
+        def exhausted(*_args, **_kwargs):
+            cause = requests.exceptions.ProxyError("Tunnel connection failed: 403 Forbidden")
+            raise RetryError("Timeout of 10.0s exceeded", cause) from cause
+
+        monkeypatch.setitem(gcs._IMPL["json"], "stat_object", exhausted)
+        monkeypatch.setitem(gcs._IMPL["xml"], "stat_object", lambda *a, **k: {"size": 3})
+        gcs.set_backend("auto")
+
+        assert gcs.stat_object("fc-bucket", "f.txt") == {"size": 3}
+        assert gcs.active_backend() == "xml"

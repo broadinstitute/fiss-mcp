@@ -610,8 +610,10 @@ What it does, if you'd rather do it by hand:
 
    ```sh
    #!/bin/sh
-   LOG=/tmp/fiss-mcp-stderr.log
-   echo "=== $(date) ===" >> "$LOG" 2>/dev/null || LOG=/dev/null
+   LOGDIR=/tmp/fiss-mcp-$(id -u)
+   mkdir -p -m 700 "$LOGDIR" 2>/dev/null
+   LOG="$LOGDIR/stderr.log"
+   ( umask 077; echo "=== $(date) ===" >> "$LOG" ) 2>/dev/null || LOG=/dev/null
    exec /opt/fiss-mcp/venv/bin/python3 /opt/fiss-mcp/repo/src/terra_mcp/server.py --gcs-backend xml "$@" 2>>"$LOG"
    ```
 
@@ -775,9 +777,11 @@ workspace bucket. Two things are required:
 1. **Select the backend.** `scripts/install-claude-science.sh` already puts
    `--gcs-backend xml` in the generated `run.sh`; if you wrote the launcher by
    hand, add it there or to the connector command. The default,
-   `--gcs-backend auto`, also works: it tries the JSON client, notices the host
-   is unreachable, and switches to XML for the rest of the process. `xml` just
-   skips the one wasted attempt and the confusing first log line.
+   `--gcs-backend auto`, also works, but only because the probe that detects the
+   blocked host runs with a bounded retry: `google-cloud-storage`'s default
+   policy retries a proxy refusal for 120 seconds, which is longer than an MCP
+   client will wait, so an unbounded probe would time out instead of falling
+   back. `xml` skips the probe altogether, which is why the installer sets it.
 2. **Allowlist each bucket**, as described in
    [Allowed domains](#allowed-domains).
 
@@ -797,8 +801,9 @@ Remaining differences when the XML backend is in use:
 
 ### Troubleshooting
 
-- **Server stderr:** `tail -n 60 /tmp/fiss-mcp-stderr.log` — each launch appends
-  a timestamped header.
+- **Server stderr:** `tail -n 60 /tmp/fiss-mcp-$(id -u)/stderr.log` — each launch
+  appends a timestamped header. The directory is created mode 0700 and the log
+  0600, because `/tmp` is shared and the log carries Terra error text.
 - **Every tool fails with "verify your Google credentials"** but the terminal
   smoke test gives 200 → almost certainly the network allowlist. Confirm by
   running a probe inside the sandbox: temporarily insert this before the `exec`
