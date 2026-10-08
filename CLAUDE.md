@@ -65,8 +65,11 @@ All planned tools have been successfully implemented following test-driven devel
      sorted by namespace then name
    - Requests only four fields via `fapi.list_workspaces(fields=...)`. Without
      it Terra builds and transfers the complete object for every workspace an
-     account can see (2,234 in the reported case) and the tool discards nearly
-     all of it; a 400 falls back to an unfiltered request (issue #16)
+     account can see and the tool discards nearly all of it. Measured on a
+     2,239-workspace account: **20,746,328 bytes without `fields`, 433,923
+     with** (18 keys per workspace down to 4), so this call was slow for the
+     same reason `get_entities` was, volume rather than latency. A 400 falls
+     back to an unfiltered request (issue #16)
    - Returns a dict (`workspaces`, `count`, `matching`, `total_accessible`,
      `truncated`, `filters`), not a bare list
 2. ✅ `get_workspace_metadata` - Get workspace metadata and attributes for dashboard documentation
