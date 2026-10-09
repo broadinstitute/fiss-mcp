@@ -1,6 +1,6 @@
 [project]
 name = "terra-mcp"
-version = "0.1.0"
+version = "2.0.0"
 description = "MCP server for interacting with Terra.Bio workspaces via FISS API"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,8 +22,19 @@ classifiers = [
 dependencies = [
     "fastmcp>=3.0.0b1",  # Skills require 3.x; using beta until stable release
     "firecloud>=0.16.39",
+    # Retry.with_timeout, used to bound the GCS backend probe, is api-core >= 2.3;
+    # google-cloud-storage's own floor can resolve to something older.
+    "google-api-core>=2.3.0",
+    "google-auth>=2.0.0",  # token minting for the GCS XML backend
     "google-cloud-batch>=0.17.0",
+    "google-cloud-storage>=2.0.0",
     "pydantic>=2.0.0",
+    "requests>=2.25.0",  # GCS XML API backend
+    # httpx (used by fastmcp) builds a transport for every proxy in the
+    # environment when a client is created, and raises ImportError without this
+    # package if any of them is a socks:// URL. Claude Science's sandbox sets
+    # ALL_PROXY=socks5h://..., so the server cannot start there without it.
+    "socksio>=1.0.0",
 ]
 
 [project.optional-dependencies]

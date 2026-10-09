@@ -16,11 +16,14 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
   - [Example Usage](#example-usage)
 - [Data Privacy and Security Considerations](#data-privacy-and-security-considerations)
 - [Installation](#installation)
+  - [Pointing at a different Terra deployment](#pointing-at-a-different-terra-deployment)
 - [Usage](#usage)
   - [Running the Server (Development)](#running-the-server-development)
   - [Running the Server (Production)](#running-the-server-production)
   - [Claude Desktop Integration](#claude-desktop-integration)
   - [Claude Code Integration](#claude-code-integration)
+- [Claude Science Integration](#claude-science-integration)
+  - [GCS inside Claude Science](#gcs-inside-claude-science)
 - [Testing](#testing)
 - [Development](#development)
   - [Project Structure](#project-structure)
@@ -34,7 +37,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 ## Available Tools
 
-This MCP server provides 16 tools for interacting with Terra.Bio workspaces:
+This MCP server provides 21 tools for interacting with Terra.Bio workspaces:
 
 ### Read-Only Tools (Always Available)
 
@@ -42,10 +45,10 @@ These tools are available in both read-only mode (default) and when write access
 
 #### Workspace & Data Discovery
 
-- **`list_workspaces`** - List all Terra workspaces accessible to the authenticated user
+- **`list_workspaces`** - List Terra workspaces accessible to the authenticated user, filtered by `name_contains` / `namespace` and capped by `limit` (default 100)
 - **`get_workspace_metadata`** - Get workspace metadata and attributes for dashboard documentation (description, bucket, Google project, access level, authorization domain, timestamps)
-- **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts
-- **`get_entities`** - Read entity data from Terra data tables for workflow inputs
+- **`get_workspace_data_tables`** - List data tables (entity types) in a workspace with row counts and column names
+- **`get_entities`** - Read rows from a Terra data table: `entity_name` for an exact single-row lookup, or a page with column selection (`columns`), paging (`page`, `page_size`) and text filtering (`filter_terms`), under a response-size guard (`max_response_bytes`) that refuses an oversized page instead of returning it
 
 #### Workflow Monitoring & Status
 
@@ -115,14 +118,13 @@ Skills contain step-by-step procedures, best practices, and anti-patterns.
 Once configured, you can interact with Terra.Bio through Claude:
 
 ```
-Human: List all my Terra workspaces
+Human: Find my malaria workspaces
 
-Claude: I'll list your accessible Terra workspaces.
-[Claude calls list_workspaces tool]
-You have access to 3 workspaces:
-1. broad-firecloud-testing/demo-workspace (created by user@broad.io on 2024-01-15)
-2. my-billing/analysis-workspace (created by user@broad.io on 2024-02-01)
-...
+Claude: I'll search your accessible Terra workspaces.
+[Claude calls list_workspaces with name_contains="malaria"]
+2 of your 2,234 accessible workspaces match:
+1. broad-firecloud-dsde-methods/sr-malaria (created by user@example.org on 2024-01-15)
+2. my-billing/malaria-analysis (created by user@example.org on 2024-02-01)
 ```
 
 ```
@@ -282,7 +284,34 @@ The NIH and other regulatory bodies have issued guidance on the use of generativ
 
 - Python 3.10 or higher
 - Google credentials configured for Terra.Bio access (via FISS)
-- Terra.Bio account with workspace access
+- Terra.Bio account with workspace access. Any Terra account works; nothing here
+  is specific to one institution.
+- A **Google-backed** Terra workspace, for part of the toolset. The GCS tools
+  (`list_gcs_objects`, `get_gcs_object_metadata`, `read_gcs_object`,
+  `download_gcs_file`, and `get_workflow_logs(fetch_content=True)`) assume
+  `gs://` buckets, and `get_batch_job_status` assumes Google Batch, so neither
+  applies to a workspace backed by Azure storage. The Terra API tools
+  (workspaces, data tables, entities, submissions, method configs, outputs,
+  cost) do not care.
+- `get_batch_job_status` additionally needs the workspace's Cromwell to run on
+  Google Batch. A workspace still on the older Pipelines API backend has no
+  Batch job to query.
+
+#### Pointing at a different Terra deployment
+
+Every Terra call goes through FISS, which reads its API root from
+`~/.fissconfig` (or a `.fissconfig` in the working directory) and defaults to
+`https://api.firecloud.org/api/`. No part of this server hardcodes that host.
+To use another deployment, set `root_url` under `[DEFAULT]`:
+
+```ini
+[DEFAULT]
+root_url = https://api.firecloud.example.org/api/
+```
+
+Then substitute your own host wherever this README writes
+`api.firecloud.org`, including the Claude Science
+[Allowed domains](#allowed-domains) list.
 
 ### Setup
 
@@ -347,6 +376,22 @@ python src/terra_mcp/server.py
 # Write-enabled mode
 python src/terra_mcp/server.py --allow-writes
 ```
+
+#### `--gcs-backend {auto,json,xml}`
+
+How the server reaches Google Cloud Storage, which backs `list_gcs_objects`,
+`get_gcs_object_metadata`, `read_gcs_object`, `download_gcs_file`, and
+`get_workflow_logs(fetch_content=True)`.
+
+| Value | Behaviour |
+|---|---|
+| `auto` (default) | Use `google-cloud-storage` (JSON API on `storage.googleapis.com`); if that host turns out to be unreachable, fall back to the XML API for the rest of the process. |
+| `json` | Always use `google-cloud-storage`. |
+| `xml` | Always use the GCS XML API on per-bucket hostnames, `{bucket}.storage.googleapis.com`. |
+
+`auto` is right everywhere except Claude Science, whose sandbox blocks
+`storage.googleapis.com` outright; see
+[GCS inside Claude Science](#gcs-inside-claude-science).
 
 ### Claude Desktop Integration
 
@@ -479,6 +524,336 @@ To reconnect after code changes:
 claude mcp reconnect terra
 ```
 
+## Claude Science Integration
+
+Claude Science can run this server as a **Local command** connector
+(Connectors → Add connector → Local command). It works, but Claude Science
+launches local connectors inside a macOS sandbox that is far more restrictive
+than Claude Desktop or Claude Code, so the "clone it anywhere and point at your
+venv" setup from the sections above fails in several ways. This section
+documents what the sandbox does and how to install around it.
+
+> **macOS only, for now.** Everything in this section, including
+> `scripts/install-claude-science.sh` (which refuses to run elsewhere), was
+> written and tested against Claude Science on macOS. Claude Science also ships
+> for Windows 11 and Linux x64, and the server has no macOS dependency, but the
+> install layout here is built around macOS specifics: a Homebrew interpreter
+> outside `$HOME`, `/opt/fiss-mcp`, `/private/tmp`, and the sandbox behaviour
+> observed on that platform. Windows in particular has its own rules for local
+> connectors, where the command must start with `npx`, `node`, `python` or a
+> full program path and launching through `npm` or a `.cmd`, `.bat` or `.ps1`
+> file is unsupported. Nobody has worked out or tested the equivalent setup on
+> either platform. **This limitation is specific to the Claude Science
+> connector.** The server itself is plain Python and runs anywhere Python 3.10+
+> does; see [Claude Desktop Integration](#claude-desktop-integration) and
+> [Claude Code Integration](#claude-code-integration), which have no platform
+> restriction.
+
+Most of what follows is install-side configuration. The one server-side
+setting that matters here is `--gcs-backend`, because Claude Science blocks the
+host the normal Google Cloud Storage client uses; see
+[GCS inside Claude Science](#gcs-inside-claude-science).
+
+### What the sandbox does
+
+Observed with Claude Science on macOS (sandbox runtime "Operon" 0.1.55,
+October 2026):
+
+| Restriction | Symptom | Workaround |
+|---|---|---|
+| **Cannot execute binaries under `$HOME`** | `sandbox-exec: execvp() of '~/…/venv/bin/python3' failed: Operation not permitted` | Use a Python installed outside your home (Homebrew: `/opt/homebrew/bin/python3.12`). Conda, pyenv, and venvs under `~` won't launch. |
+| **Cannot read files under `$HOME`** | `can't open file '~/…/server.py': [Errno 1] Operation not permitted` | Keep the repo, venv, and credentials outside `$HOME` (this guide uses `/opt/fiss-mcp`). |
+| **Cannot write anywhere except `/private/tmp` and a per-connector workspace dir** | Log/cache writes fail with `Operation not permitted` | Send logs to `/tmp`. Don't set `TMPDIR` (the sandbox sets its own). |
+| **Minimal environment** | `KeyError: 'PATH'`; credentials not found | Set `HOME`, `PATH`, `GOOGLE_APPLICATION_CREDENTIALS` in the connector's env box. |
+| **No direct network; all traffic through a local proxy with a domain allowlist** | `Tunnel connection failed: 403 Forbidden (host oauth2.googleapis.com not on the allowlist)`; every tool returns "verify your Google credentials" | Add the domains in [Allowed domains](#allowed-domains). |
+| **`storage.googleapis.com` is always blocked** | GCS tools fail even after allowlisting it | Run with `--gcs-backend xml` and allowlist each bucket's own hostname; see [GCS inside Claude Science](#gcs-inside-claude-science). |
+| **A SOCKS proxy is in the environment** | `ImportError: Using SOCKS proxy, but the 'socksio' package is not installed` when the server starts | The sandbox sets `ALL_PROXY=socks5h://...`, and httpx builds a transport for every proxy it finds, so `socksio` must be installed. It is a declared dependency as of this version; re-run the installer or `pip install socksio` in the venv. |
+| **Stderr must be redirected** | Server crashes inside `mcp.run()` with a truncated traceback, but runs fine from a terminal | The launcher script redirects stderr to a file. (`FASTMCP_SHOW_CLI_BANNER` had no effect and is not needed.) |
+
+Two further details:
+
+- **FISS requires `gcloud` on `PATH` at import time** (`firecloud/__init__.py`
+  calls `which('gcloud')`). It only checks that the file exists. A gcloud under
+  `~/Development/google-cloud-sdk/bin` passed this check despite the read
+  restriction, so the SDK does not need relocating.
+- **The server process is long-lived.** Claude Science keeps it running across
+  tool calls and conversations, so after changing `run.sh`, the code, or the
+  allowlist you must restart it: `pkill -f terra_mcp/server.py` (the next tool
+  call respawns it), or delete and re-add the connector.
+
+### Installation
+
+`scripts/install-claude-science.sh` performs every step below with progress
+output and ends by printing the exact values to paste into Claude Science:
+
+```bash
+./scripts/install-claude-science.sh                 # read-only mode (recommended)
+./scripts/install-claude-science.sh --allow-writes  # enable write tools
+./scripts/install-claude-science.sh --source .      # install from this checkout instead of cloning
+./scripts/install-claude-science.sh --help          # all options
+```
+
+What it does, if you'd rather do it by hand:
+
+1. **Interpreter outside `$HOME`.** Homebrew Python (`brew install python@3.12` if needed).
+2. **Install tree outside `$HOME`.** Creates `/opt/fiss-mcp` owned by you, containing:
+   - `repo/` — a clone (or copy) of this repository
+   - `venv/` — created from the Homebrew interpreter, with `pip install -e repo`
+   - `adc.json` — a copy of your Google Application Default Credentials (ADC), mode 600
+   - `run.sh` — the launcher the connector calls
+3. **Credentials.** Copies `~/.config/gcloud/application_default_credentials.json`
+   to `/opt/fiss-mcp/adc.json`. This file holds a long-lived refresh token for
+   your Google account — treat it like a password. A service-account key
+   (`--credentials path.json`) is the cleaner option on shared machines.
+4. **Launcher** `/opt/fiss-mcp/run.sh`:
+
+   ```sh
+   #!/bin/sh
+   LOGDIR=/tmp/fiss-mcp-$(id -u)
+   mkdir -p -m 700 "$LOGDIR" 2>/dev/null
+   LOG="$LOGDIR/stderr.log"
+   ( umask 077; echo "=== $(date) ===" >> "$LOG" ) 2>/dev/null || LOG=/dev/null
+   exec /opt/fiss-mcp/venv/bin/python3 /opt/fiss-mcp/repo/src/terra_mcp/server.py --gcs-backend xml "$@" 2>>"$LOG"
+   ```
+
+5. **Smoke test** from a terminal with the connector's exact environment:
+
+   ```bash
+   env -i HOME=/opt/fiss-mcp \
+     GOOGLE_APPLICATION_CREDENTIALS=/opt/fiss-mcp/adc.json \
+     PATH=/path/to/google-cloud-sdk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin \
+     /opt/fiss-mcp/venv/bin/python3 -c \
+     "from firecloud import api as fapi; print(fapi.list_workspaces().status_code)"   # expect 200
+   ```
+
+   This proves credentials and imports; it does *not* exercise the network
+   allowlist, which only applies inside the sandbox.
+
+### Connector settings
+
+In Claude Science: **Connectors → Add connector → Local command**
+
+| Field | Value |
+|---|---|
+| Name | `terra` |
+| Command | `/opt/fiss-mcp/run.sh` (append ` --allow-writes` for write mode) |
+| Environment variables | see below |
+| Description | `Terra.bio workspaces, data tables, submissions, logs` |
+
+The installer's `run.sh` already passes `--gcs-backend xml`. If your launcher
+predates that flag, either re-run the installer or put the flag in the Command
+field instead: `/opt/fiss-mcp/run.sh --gcs-backend xml`. Passing it in both
+places is harmless, the last one wins.
+
+Environment variables (one per line; substitute your gcloud directory):
+
+```
+HOME=/opt/fiss-mcp
+GOOGLE_APPLICATION_CREDENTIALS=/opt/fiss-mcp/adc.json
+PATH=/path/to/google-cloud-sdk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+`HOME=/opt/fiss-mcp` keeps anything the Google client libraries cache out of
+your blocked real home directory. Do **not** set `TMPDIR`.
+
+`GOOGLE_CLOUD_PROJECT=<project-id>` is optional and only affects
+`--gcs-backend json`: the XML backend never sends a project, and the JSON
+backend falls back to a placeholder when it cannot determine one. Set it if you
+want GCS quota attributed to a particular project. Do not paste it with a
+literal placeholder value, an invalid project id is worse than none.
+
+### Allowed domains
+
+The sandbox refuses all outbound connections except to domains on its
+allowlist. In Claude Science, open the connector's **Allowed domains** setting
+and paste:
+
+```
+oauth2.googleapis.com
+api.firecloud.org
+batch.googleapis.com
+www.googleapis.com
+```
+
+| Domain | Needed by |
+|---|---|
+| `oauth2.googleapis.com` | Token refresh — nothing works without it |
+| `api.firecloud.org` | Terra / FISS API: workspaces, entities, submissions, method configs, outputs, cost. Replace with your own host if `root_url` in `~/.fissconfig` points at a different Terra deployment (see [Prerequisites](#prerequisites)) |
+| `batch.googleapis.com` | `get_batch_job_status` |
+| `www.googleapis.com` | Some google-auth and client-library calls |
+
+Then add **one entry per bucket you need to read**, using the bucket's own
+hostname:
+
+```
+fc-<workspace-bucket-uuid>.storage.googleapis.com
+```
+
+A workspace's bucket name is the `bucketName` field returned by
+`get_workspace_metadata`. That single entry covers everything stored in the
+workspace: workflow logs, outputs, and any inputs you uploaded there. Input
+files that live in *other* buckets (reference data, another workspace) each
+need their own entry.
+
+**Wildcards.** `*.storage.googleapis.com` was rejected when entered in the
+app's **Settings** > **Network** list, so list each bucket by name there.
+Claude Science's documentation does allow wildcards in the two other places a
+domain can come from (the `config.toml` key below and an organization-managed
+list), where a wildcard covers subdomains only and so would not re-enable the
+blocked `storage.googleapis.com` itself. Whether a wildcard is accepted for
+this host in those channels is untested.
+
+**You may not have to pre-populate the list.** Claude Science appears to prompt
+for permission the first time a tool reaches a bucket, rather than simply
+failing, which matches its documented default that "members allow a new site
+themselves when Claude asks". Observed with a **public** bucket;
+**not yet verified for a private bucket** such as a Terra workspace bucket,
+where the request also has to carry working credentials. Until that is
+confirmed, treat the per-bucket allowlist entries above as the reliable route
+and the prompt as a convenience.
+
+#### Adding the domains without the UI
+
+Claude Science reads `~/.claude-science/config.toml` (on Windows,
+`%USERPROFILE%\.claude-science\config.toml`) and its
+`[sandbox.network] allowed_domains` key is **additive** to whatever is in
+**Settings** > **Network**:
+
+```toml
+[sandbox.network]
+allowed_domains = [
+  "oauth2.googleapis.com",
+  "api.firecloud.org",
+  "batch.googleapis.com",
+  "www.googleapis.com",
+  "fc-11111111-2222-3333-4444-555555555555.storage.googleapis.com",
+]
+```
+
+The file is read once at app startup, so **restart Claude Science** after
+editing it. Restarting the connector with `pkill -f terra_mcp/server.py` is not
+enough, since the allowlist is enforced by the app's sandbox rather than by the
+server.
+
+To print the bucket lines for every workspace you can reach, run this with the
+connector's own interpreter:
+
+```bash
+/opt/fiss-mcp/venv/bin/python3 - <<'EOF'
+from firecloud import api as fapi
+
+for ws in fapi.list_workspaces().json():
+    bucket = ws.get("workspace", {}).get("bucketName")
+    if bucket:
+        print(f'  "{bucket}.storage.googleapis.com",')
+EOF
+```
+
+On Team and Enterprise plans an admin can instead set one list for every
+member under **Organization settings** > **Claude Science** > **Manage network
+allowlist** > **Custom domains**, which does document wildcard support and
+holds up to 600 domains. Be aware that turning that switch on replaces every
+member's own list, including anything `config.toml` added, for the whole
+organization. There is no API or MDM policy channel for the allowlist;
+deploying `config.toml` per member is the supported automation route.
+
+Restart the server after changing the list (`pkill -f terra_mcp/server.py`).
+
+### GCS inside Claude Science
+
+Claude Science permanently blocks `storage.googleapis.com`, which is the only
+host the `google-cloud-storage` library talks to (it uses the GCS JSON API).
+Its UI points you at the bucket's own hostname instead
+(`my-bucket.storage.googleapis.com`), and those virtual-hosted names serve the
+GCS **XML** API. So the server has a second GCS backend that speaks XML, and
+all five GCS-touching tools work in Claude Science once you select it:
+`list_gcs_objects`, `get_gcs_object_metadata`, `read_gcs_object`,
+`download_gcs_file`, and `get_workflow_logs(fetch_content=True)`.
+
+This was confirmed working inside the sandbox on 2026-10-02 against a Terra
+workspace bucket. Two things are required:
+
+1. **Select the backend.** `scripts/install-claude-science.sh` already puts
+   `--gcs-backend xml` in the generated `run.sh`; if you wrote the launcher by
+   hand, add it there or to the connector command. The default,
+   `--gcs-backend auto`, also works, but only because the probe that detects the
+   blocked host runs with a bounded retry: `google-cloud-storage`'s default
+   policy retries a proxy refusal for 120 seconds, which is longer than an MCP
+   client will wait, so an unbounded probe would time out instead of falling
+   back. `xml` skips the probe altogether, which is why the installer sets it.
+2. **Allowlist each bucket**, as described in
+   [Allowed domains](#allowed-domains).
+
+Remaining differences when the XML backend is in use:
+
+- `get_gcs_object_metadata` returns `time_created: null`. The XML API reports
+  only a last-modified time.
+- `list_gcs_objects` returns `content_type: null` for each object. An XML
+  listing does not carry content types; call `get_gcs_object_metadata` for one.
+- `md5_hash` in a *listing* is derived from the object's ETag, so it is `null`
+  for composite and multipart-uploaded objects. `get_gcs_object_metadata`
+  reports the real hashes either way.
+- `download_gcs_file` must target `/tmp` or the per-connector workspace
+  directory, since the sandbox permits writes nowhere else.
+- Requester-pays buckets are not supported by either backend. Terra workspace
+  buckets are not requester-pays.
+
+### Troubleshooting
+
+- **Server stderr:** `tail -n 60 /tmp/fiss-mcp-$(id -u)/stderr.log` — each launch
+  appends a timestamped header. The directory is created mode 0700 and the log
+  0600, because `/tmp` is shared and the log carries Terra error text.
+- **Every tool fails with "verify your Google credentials"** but the terminal
+  smoke test gives 200 → almost certainly the network allowlist. Confirm by
+  running a probe inside the sandbox: temporarily insert this before the `exec`
+  line in `run.sh`, restart the server, and read the log:
+
+  ```sh
+  { echo "--- env ---"; env | sort; echo "--- probe ---"
+    /opt/fiss-mcp/venv/bin/python3 -c 'import traceback
+  try:
+      from firecloud import api as fapi; r = fapi.list_workspaces(); print("terra:", r.status_code)
+  except Exception: traceback.print_exc()'; } >> "$LOG" 2>&1
+  ```
+
+  A `403 Forbidden (host X not on the allowlist)` names the domain to add.
+- **`execvp() … Operation not permitted`:** the command path is under `$HOME`. Move the interpreter.
+- **`can't open file … Operation not permitted`:** the script or a dependency is under `$HOME`. Move it.
+- **`KeyError: 'PATH'`:** the `PATH` line is missing from the environment box.
+- **`ImportError: Using SOCKS proxy, but the 'socksio' package is not installed`:** the sandbox sets `ALL_PROXY` to a `socks5h://` address, and httpx creates a transport for every proxy in the environment when it builds a client, so the package has to be present even though Terra and GCS traffic go through the plain HTTP proxy instead. `/opt/fiss-mcp/venv/bin/pip install socksio`, or re-run the installer, which now gets it as a declared dependency.
+- **Changes don't take effect:** the old process is still running. `pkill -f terra_mcp/server.py`.
+- **A GCS tool reports `Could not reach fc-….storage.googleapis.com through the sandbox proxy`:** that bucket's hostname is not on the allowed-domains list. Add it and restart the server. To confirm from inside the sandbox, insert this probe before the `exec` line in `run.sh`:
+
+  ```sh
+  /opt/fiss-mcp/venv/bin/python3 -c 'import requests, google.auth, google.auth.transport.requests
+  creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_only"])
+  creds.refresh(google.auth.transport.requests.Request())
+  b = "fc-<uuid>"
+  r = requests.get(f"https://{b}.storage.googleapis.com/?list-type=2&max-keys=3",
+                   headers={"Authorization": f"Bearer {creds.token}"}, timeout=20)
+  print(b, r.status_code, r.text[:300])' >> "$LOG" 2>&1
+  ```
+
+  200 means the bucket is reachable; `403 … not on the allowlist` names what to add.
+- **`Project was not passed and could not be determined from the environment`:** only the JSON backend needs a project. Set `GOOGLE_CLOUD_PROJECT` in the connector environment, or use `--gcs-backend xml`, which never needs one.
+- **Credentials expired / 401:** `gcloud auth application-default login`, then re-copy the ADC file (re-running the install script does this).
+
+### Untested alternative
+
+The sandbox environment shows a per-connector workspace directory,
+`~/.claude-science/orgs/<org-id>/workspaces/_mcp-terra/`, that is writable and
+whose `.venv/python` is exempted from the dynamic-library restrictions. That
+suggests Claude Science intends local MCP servers to live *there*, with their
+own `.venv`, which would make the `/opt/fiss-mcp` relocation unnecessary. This
+has not been tested.
+
+### A note on data
+
+Everything in the [Data Privacy and Security Considerations](#data-privacy-and-security-considerations)
+section applies here. The sandbox restricts what the *server* can reach on your
+machine and on the network; it does nothing to restrict what Terra data flows
+into the model's context once a tool returns.
+
 ## Testing
 
 Run the test suite to verify the server implementation:
@@ -494,9 +869,9 @@ PYTHONPATH=src pytest tests/ -v
 PYTHONPATH=src pytest tests/ --cov=src/terra_mcp --cov-report=term
 ```
 
-The test suite includes 93 comprehensive tests:
+The test suite includes 251 tests:
 - Server initialization verification
-- Tool registration checks (all 16 tools)
+- Tool registration checks (all 21 tools)
 - Mocked FISS API responses
 - Mocked GCS log fetching and truncation
 - Error handling scenarios (404s, 403s, 400s, 409s, API failures, GCS errors)
@@ -504,6 +879,8 @@ The test suite includes 93 comprehensive tests:
 - Helper function tests (truncation logic, GCS URL parsing)
 - Read-only mode safety feature tests (7 tests verifying write operations are properly blocked)
 - Coverage for all tool categories: workspace discovery, monitoring, workflow management, and data management
+- GCS backend tests (`tests/test_gcs.py`): XML API listing/paging/delimiters, header-to-metadata mapping, range reads, error mapping, backend auto-detection, and the project fallback
+- A static check that every `ctx.info()` / `ctx.error()` call is awaited, since FastMCP 3 made them coroutines
 
 ## Development
 
@@ -513,8 +890,10 @@ The test suite includes 93 comprehensive tests:
 fiss-mcp/
 ├── src/terra_mcp/
 │   ├── __init__.py          # Package initialization
+│   ├── gcs.py               # GCS access (JSON client + XML API backend)
 │   └── server.py            # MCP server implementation
 ├── tests/
+│   ├── test_gcs.py          # GCS backend tests
 │   └── test_server.py       # Test suite
 ├── pyproject.toml          # Project configuration
 ├── CLAUDE.md               # Project specification
@@ -619,7 +998,9 @@ Potential areas for expansion (see [CLAUDE.md](CLAUDE.md) for details):
 
 - **FastMCP**: Python framework for building MCP servers
 - **FISS (firecloud)**: Python client for Terra.Bio API
-- **google-cloud-storage**: For fetching workflow logs from GCS
+- **google-cloud-storage**: For fetching workflow logs and bucket objects from GCS
+- **requests / google-auth**: Used directly by the GCS XML API backend (`--gcs-backend xml`)
+- **socksio**: Lets httpx build a client when a `socks5h://` proxy is in the environment, as it is inside the Claude Science sandbox
 - **Pydantic**: Data validation and schema generation
 
 ## Troubleshooting

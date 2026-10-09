@@ -7,6 +7,7 @@ Provides tools for listing workspaces, querying data tables, and monitoring work
 import argparse
 import base64
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -16,8 +17,22 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
 from firecloud import api as fapi
-from google.cloud import batch_v1, storage
+from google.cloud import batch_v1
 from google.cloud.exceptions import Forbidden, NotFound
+
+from terra_mcp import gcs
+
+logger = logging.getLogger(__name__)
+
+# Entity pages are fetched one at a time; Terra will accept more, but a page
+# large enough to swamp the caller is the bug this limit exists to prevent.
+MAX_ENTITY_PAGE_SIZE = 1000
+
+# Measured against a real table: 100 rows x 163 attributes is 1.08 MB, roughly
+# 270k tokens of JSON. Terra returns it in a fraction of a second, so size, not
+# latency, is what makes a wide table unusable. Pages above this are refused
+# with instructions rather than returned.
+DEFAULT_MAX_ENTITY_RESPONSE_BYTES = 250_000
 
 # Global flag to control write access (default: read-only mode)
 ALLOW_WRITES = False
@@ -42,7 +57,39 @@ if skills_dir.exists():
 # ===== Helper Functions =====
 
 
-def _check_write_access(ctx: Context) -> None:
+async def _log_error(ctx: Context, message: str) -> None:
+    """Report an error to the MCP client and mirror it to the server's stderr.
+
+    MCP log notifications are not shown by every client - Claude Science, for
+    one, surfaces only the server's stderr - so an exception reported through
+    ctx.error() alone is invisible there. When called from an except block this
+    also logs the traceback.
+
+    stderr comes first, and the client call cannot raise past it: ctx.error()
+    fails on a dead session (a client that timed out mid-download, or no active
+    request context), and losing the stderr record in exactly that case would
+    defeat the point of this helper.
+    """
+    logger.error(message, exc_info=sys.exc_info()[0] is not None)
+    try:
+        await ctx.error(message)
+    except Exception as exc:  # a dead client must not become a second failure
+        logger.debug("could not deliver the error to the MCP client: %s", exc)
+
+
+def _gcs_denied_message(gcs_uri: str) -> str:
+    """Access-denied text for a GCS URI, with the sandbox hint when it applies."""
+    message = f"Access denied to {gcs_uri}. Check bucket permissions."
+    if gcs.active_backend() == "xml":
+        bucket, _ = _parse_gcs_uri(gcs_uri)
+        message += (
+            f" Running under Claude Science, also confirm '{bucket}.storage.googleapis.com' "
+            "is on this connector's allowed-domains list."
+        )
+    return message
+
+
+async def _check_write_access(ctx: Context) -> None:
     """Check if write operations are allowed.
 
     Raises ToolError if the server is in read-only mode (ALLOW_WRITES=False).
@@ -55,11 +102,31 @@ def _check_write_access(ctx: Context) -> None:
         ToolError: If write operations are disabled
     """
     if not ALLOW_WRITES:
-        ctx.warning("Write operation blocked: server is in read-only mode")
+        await ctx.warning("Write operation blocked: server is in read-only mode")
         raise ToolError(
             "This server is running in read-only mode. Write operations are disabled for safety. "
             "To enable write operations, restart the server with the --allow-writes flag."
         )
+
+
+# The four fields this tool returns. Without `fields`, Terra builds and sends the
+# complete object for every workspace an account can see (thousands), and the
+# tool then throws nearly all of it away.
+WORKSPACE_LIST_FIELDS = (
+    "workspace.namespace,workspace.name,workspace.createdBy,workspace.createdDate"
+)
+
+
+def _list_workspaces_response():
+    """Request only the fields list_workspaces returns, tolerating older Terra.
+
+    `fields` is supported by the current API; fall back to an unfiltered request
+    rather than failing outright if a deployment rejects it.
+    """
+    response = fapi.list_workspaces(fields=WORKSPACE_LIST_FIELDS)
+    if response.status_code == 400:
+        return fapi.list_workspaces()
+    return response
 
 
 def _truncate_log_content(content: str, max_chars: int = 25000) -> tuple[str, bool]:
@@ -94,7 +161,7 @@ def _truncate_log_content(content: str, max_chars: int = 25000) -> tuple[str, bo
     return head + truncation_msg + tail, True
 
 
-def _fetch_gcs_log(gcs_url: str, ctx: Context) -> str | None:
+async def _fetch_gcs_log(gcs_url: str, ctx: Context) -> tuple[str | None, str | None]:
     """Fetch log content from Google Cloud Storage.
 
     Args:
@@ -102,33 +169,31 @@ def _fetch_gcs_log(gcs_url: str, ctx: Context) -> str | None:
         ctx: FastMCP context for logging
 
     Returns:
-        Log content as string, or None if fetch fails
+        (content, error) with exactly one of them set. A caller must be able to
+        tell a failed fetch from one that was never asked for; an omitted key
+        cannot express that, and a reader seeing only URLs reasonably concludes
+        the fetch was ignored rather than that the object is gone. Terra purges
+        workflow intermediates, so a 404 here is ordinary on old submissions.
     """
     if not gcs_url or not gcs_url.startswith("gs://"):
-        return None
+        return None, f"not a gs:// URL: {gcs_url!r}"
 
     try:
         # Parse GCS URL: gs://bucket/path/to/file
         url_parts = gcs_url[5:].split("/", 1)
         if len(url_parts) != 2:
-            ctx.error(f"Invalid GCS URL format: {gcs_url}")
-            return None
+            await _log_error(ctx, f"Invalid GCS URL format: {gcs_url}")
+            return None, f"malformed GCS URL: {gcs_url}"
 
         bucket_name, blob_name = url_parts
 
-        # Initialize GCS client and fetch blob
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-
-        # Download as text
-        content = blob.download_as_text()
-        ctx.info(f"Successfully fetched log from {gcs_url} ({len(content)} chars)")
-        return content
+        content = gcs.read_text(bucket_name, blob_name)
+        await ctx.info(f"Successfully fetched log from {gcs_url} ({len(content)} chars)")
+        return content, None
 
     except Exception as e:
-        ctx.error(f"Failed to fetch log from {gcs_url}: {type(e).__name__}: {e}")
-        return None
+        await _log_error(ctx, f"Failed to fetch log from {gcs_url}: {type(e).__name__}: {e}")
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _build_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -747,50 +812,112 @@ def _detect_batch_issues(status_events: list[dict[str, Any]]) -> list[dict[str, 
 
 
 @mcp.tool()
-async def list_workspaces(ctx: Context) -> list[dict[str, Any]]:
-    """List all Terra workspaces accessible to the authenticated user.
+async def list_workspaces(
+    ctx: Context,
+    name_contains: Annotated[
+        str | None, "Case-insensitive substring to match against the workspace name"
+    ] = None,
+    namespace: Annotated[
+        str | None, "Only workspaces in this billing namespace (exact, case-insensitive)"
+    ] = None,
+    limit: Annotated[
+        int | None, "Maximum workspaces to return (default 100, use None for all)"
+    ] = 100,
+) -> dict[str, Any]:
+    """List Terra workspaces accessible to the authenticated user.
 
-    Returns workspace information including namespace, name, creator, and creation date.
-    This tool requires valid Google credentials configured for FISS API access.
+    An account can see thousands of workspaces, so this returns a filtered,
+    capped slice rather than everything. Pass `name_contains` or `namespace`
+    when you are looking for a particular workspace; the counts in the response
+    tell you whether the filter was narrow enough.
+
+    Only four fields are requested from Terra (namespace, name, creator,
+    creation date), which is what the tool returns. Use get_workspace_metadata
+    for the full detail of one workspace.
+
+    Args:
+        name_contains: Case-insensitive substring match on the workspace name
+        namespace: Exact, case-insensitive billing namespace
+        limit: Maximum rows to return (default 100; None or 0 returns all matches)
 
     Returns:
-        List of workspace dictionaries with keys: namespace, name, created_by, created_date
+        Dictionary containing:
+        - workspaces: List of dicts with namespace, name, created_by, created_date,
+          sorted by namespace then name
+        - count: Number returned
+        - matching: Number matching the filters, before the limit
+        - total_accessible: Number of workspaces visible to the account
+        - truncated: True if matching exceeded the limit
+        - filters: The filters applied
     """
     try:
-        ctx.info("Fetching accessible Terra workspaces")
-        response = fapi.list_workspaces()
+        await ctx.info(
+            "Fetching accessible Terra workspaces"
+            + (f" matching name~{name_contains!r}" if name_contains else "")
+            + (f" in namespace {namespace!r}" if namespace else "")
+        )
+        response = _list_workspaces_response()
 
         if response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch workspaces (HTTP {response.status_code}). "
                 "Please check your Google credentials and Terra access permissions."
             )
 
         workspaces = response.json()
-        ctx.info(f"Successfully retrieved {len(workspaces)} accessible workspaces")
+        total_accessible = len(workspaces)
 
-        # Extract relevant workspace information
-        result = [
+        rows = [
             {
                 "namespace": ws["workspace"]["namespace"],
                 "name": ws["workspace"]["name"],
-                "created_by": ws["workspace"]["createdBy"],
-                "created_date": ws["workspace"]["createdDate"],
+                "created_by": ws["workspace"].get("createdBy"),
+                "created_date": ws["workspace"].get("createdDate"),
             }
             for ws in workspaces
         ]
 
-        return result
+        # Terra has no server-side name filter on this endpoint, so filter here.
+        # The payload is small now that only four fields are requested.
+        if namespace:
+            wanted = namespace.casefold()
+            rows = [r for r in rows if (r["namespace"] or "").casefold() == wanted]
+        if name_contains:
+            needle = name_contains.casefold()
+            rows = [r for r in rows if needle in (r["name"] or "").casefold()]
+
+        rows.sort(key=lambda r: ((r["namespace"] or ""), (r["name"] or "")))
+        matching = len(rows)
+
+        if limit:
+            rows = rows[:limit]
+
+        await ctx.info(
+            f"Returning {len(rows)} of {matching} matching workspaces "
+            f"({total_accessible} accessible)"
+        )
+
+        return {
+            "workspaces": rows,
+            "count": len(rows),
+            "matching": matching,
+            "total_accessible": total_accessible,
+            "truncated": bool(limit) and matching > limit,
+            "filters": {"name_contains": name_contains, "namespace": namespace},
+        }
 
     except ToolError:
         # Re-raise ToolErrors as-is
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error listing workspaces: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error listing workspaces: {type(e).__name__}: {e}")
         raise ToolError(
             "Failed to list workspaces. Please verify your Google credentials are configured "
             "correctly and you have access to Terra.Bio."
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -835,7 +962,7 @@ async def get_workspace_metadata(
         - access_level: Caller's access level (OWNER, WRITER, READER, etc.)
     """
     try:
-        ctx.info(f"Fetching workspace metadata for {workspace_namespace}/{workspace_name}")
+        await ctx.info(f"Fetching workspace metadata for {workspace_namespace}/{workspace_name}")
 
         response = fapi.get_workspace(workspace_namespace, workspace_name)
 
@@ -850,7 +977,9 @@ async def get_workspace_metadata(
                 "You may not have permission to view this workspace."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch workspace metadata (HTTP {response.status_code}). "
                 "Please check the workspace exists and you have access."
@@ -867,7 +996,7 @@ async def get_workspace_metadata(
             for entry in auth_domain_raw
         ]
 
-        ctx.info(
+        await ctx.info(
             f"Successfully retrieved metadata for {workspace_namespace}/{workspace_name} "
             f"({len(attributes)} attributes)"
         )
@@ -890,9 +1019,12 @@ async def get_workspace_metadata(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching workspace metadata: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error fetching workspace metadata: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to fetch workspace metadata for {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -914,10 +1046,15 @@ async def get_workspace_data_tables(
     Returns:
         Dictionary containing:
         - workspace: Full workspace identifier (namespace/name)
-        - tables: List of tables with name and count fields
+        - tables: List of tables, each with:
+          - name: Table (entity type) name
+          - count: Number of rows
+          - columns: Attribute names available on that table, which are the
+            values to pass to get_entities(columns=[...])
+          - column_count: Number of attributes
     """
     try:
-        ctx.info(f"Fetching data tables for workspace {workspace_namespace}/{workspace_name}")
+        await ctx.info(f"Fetching data tables for workspace {workspace_namespace}/{workspace_name}")
 
         response = fapi.list_entity_types(workspace_namespace, workspace_name)
 
@@ -932,14 +1069,16 @@ async def get_workspace_data_tables(
                 "You may not have permission to view this workspace."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch data tables (HTTP {response.status_code}). "
                 "Please check the workspace exists and you have access."
             )
 
         entity_types = response.json()
-        ctx.info(f"Successfully retrieved {len(entity_types)} data tables")
+        await ctx.info(f"Successfully retrieved {len(entity_types)} data tables")
 
         return {
             "workspace": f"{workspace_namespace}/{workspace_name}",
@@ -947,6 +1086,10 @@ async def get_workspace_data_tables(
                 {
                     "name": name,
                     "count": details["count"],
+                    # Needed to pass `columns` to get_entities on a wide table
+                    # without fetching a row first just to learn the names.
+                    "columns": details.get("attributeNames", []),
+                    "column_count": len(details.get("attributeNames", [])),
                 }
                 for name, details in entity_types.items()
             ],
@@ -955,9 +1098,10 @@ async def get_workspace_data_tables(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching data tables: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error fetching data tables: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to fetch data tables for workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -1012,7 +1156,7 @@ async def get_submission_status(
         - note: Indication if workflow list was truncated
     """
     try:
-        ctx.info(f"Fetching status for submission {submission_id}")
+        await ctx.info(f"Fetching status for submission {submission_id}")
 
         response = fapi.get_submission(
             workspace_namespace,
@@ -1032,7 +1176,9 @@ async def get_submission_status(
                 "You may not have permission to view this submission."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch submission status (HTTP {response.status_code}). "
                 "Please check the workspace and submission ID."
@@ -1047,7 +1193,7 @@ async def get_submission_status(
             status = workflow.get("status", "Unknown")
             status_counts[status] = status_counts.get(status, 0) + 1
 
-        ctx.info(
+        await ctx.info(
             f"Retrieved submission with {len(workflows)} workflows, "
             f"status: {submission.get('status')}"
         )
@@ -1072,7 +1218,7 @@ async def get_submission_status(
                 filtered_workflow = {k: v for k, v in workflow.items() if k != "inputResolutions"}
                 filtered_workflows.append(filtered_workflow)
             limited_workflows = filtered_workflows
-            ctx.info(
+            await ctx.info(
                 f"Filtered out inputResolutions from {len(limited_workflows)} workflows "
                 "to reduce response size"
             )
@@ -1090,10 +1236,13 @@ async def get_submission_status(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching submission status: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error fetching submission status: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to fetch status for submission {submission_id} in workspace "
             f"{workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -1190,7 +1339,7 @@ async def get_job_metadata(
                     'Examples: output_name="file" or field_path="calls.*.runtimeAttributes"'
                 )
 
-        ctx.info(
+        await ctx.info(
             f"Fetching metadata for workflow {workflow_id} in submission {submission_id} "
             f"(mode={mode})"
         )
@@ -1220,7 +1369,9 @@ async def get_job_metadata(
                 "You may not have permission to view this workflow."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch workflow metadata (HTTP {response.status_code}). "
                 "Please check the workspace and workflow IDs."
@@ -1230,9 +1381,9 @@ async def get_job_metadata(
 
         # Process based on mode
         if mode == "summary":
-            ctx.info("Building structured summary from metadata")
+            await ctx.info("Building structured summary from metadata")
             summary = _build_metadata_summary(metadata)
-            ctx.info(
+            await ctx.info(
                 f"Built summary: {summary['tasks']['total']} tasks, status={summary['status']}"
             )
             return summary
@@ -1267,7 +1418,7 @@ async def get_job_metadata(
                 else:
                     # Use first execution (most common case)
                     if len(task_executions) > 1:
-                        ctx.warning(
+                        await ctx.warning(
                             f"Task '{task_name}' has {len(task_executions)} executions. "
                             "Using first one. Specify shard_index to select a specific one."
                         )
@@ -1289,7 +1440,7 @@ async def get_job_metadata(
 
             elif field_path:
                 # Dot-path extraction
-                ctx.info(f"Extracting field path: {field_path}")
+                await ctx.info(f"Extracting field path: {field_path}")
                 extracted_data = _extract_field_by_path(metadata, field_path, ctx)
                 extraction_path = field_path
 
@@ -1298,7 +1449,7 @@ async def get_job_metadata(
             size_chars = len(extracted_json)
             size_tokens = size_chars // 4
 
-            ctx.info(f"Extracted data: {size_chars} chars (~{size_tokens} tokens)")
+            await ctx.info(f"Extracted data: {size_chars} chars (~{size_tokens} tokens)")
 
             return {
                 "mode": "extract",
@@ -1315,9 +1466,12 @@ async def get_job_metadata(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching workflow metadata: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error fetching workflow metadata: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to fetch metadata for workflow {workflow_id} in submission {submission_id}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -1376,7 +1530,12 @@ async def get_workflow_logs(
         - workflow_id: The workflow UUID
         - workflow_name: Name of the workflow
         - status: Workflow execution status
-        - logs: Dictionary mapping task names to their log info (URLs and optionally content)
+        - logs: Dictionary mapping task names to their log info. Each entry has
+          stderr_url / stdout_url, and when fetch_content=True also stderr /
+          stdout. A fetch that failed sets those to null and adds
+          stderr_error / stdout_error with the reason, so "the content is gone"
+          is distinguishable from "content was not requested". Terra purges
+          workflow intermediates, so a 404 is ordinary on old submissions.
         - fetch_content: Whether content was fetched (for clarity)
 
     **SUBWORKFLOWS:**
@@ -1386,7 +1545,7 @@ async def get_workflow_logs(
     or debug subworkflows independently.
     """
     try:
-        ctx.info(f"Fetching log locations for workflow {workflow_id}")
+        await ctx.info(f"Fetching log locations for workflow {workflow_id}")
 
         # Get workflow metadata, excluding verbose fields we don't need for logs
         # Note: include_key doesn't work as expected in FISS API (returns empty calls dict)
@@ -1418,7 +1577,9 @@ async def get_workflow_logs(
                 "You may not have permission to view this workflow."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch workflow logs (HTTP {response.status_code}). "
                 "Please check the workspace and workflow IDs."
@@ -1449,11 +1610,11 @@ async def get_workflow_logs(
 
                 # Fetch actual log content if requested
                 if fetch_content:
-                    ctx.info(f"Fetching log content for task {task_key}")
+                    await ctx.info(f"Fetching log content for task {task_key}")
 
                     # Fetch stderr
                     if stderr_url:
-                        stderr_content = _fetch_gcs_log(stderr_url, ctx)
+                        stderr_content, stderr_error = await _fetch_gcs_log(stderr_url, ctx)
                         if stderr_content is not None:
                             if truncate:
                                 stderr_content, was_truncated = _truncate_log_content(
@@ -1461,10 +1622,15 @@ async def get_workflow_logs(
                                 )
                                 log_entry["stderr_truncated"] = was_truncated
                             log_entry["stderr"] = stderr_content
+                        else:
+                            # Say so explicitly: an absent key reads as "content
+                            # was never requested", a different problem entirely.
+                            log_entry["stderr"] = None
+                            log_entry["stderr_error"] = stderr_error
 
                     # Fetch stdout
                     if stdout_url:
-                        stdout_content = _fetch_gcs_log(stdout_url, ctx)
+                        stdout_content, stdout_error = await _fetch_gcs_log(stdout_url, ctx)
                         if stdout_content is not None:
                             if truncate:
                                 stdout_content, was_truncated = _truncate_log_content(
@@ -1472,10 +1638,13 @@ async def get_workflow_logs(
                                 )
                                 log_entry["stdout_truncated"] = was_truncated
                             log_entry["stdout"] = stdout_content
+                        else:
+                            log_entry["stdout"] = None
+                            log_entry["stdout_error"] = stdout_error
 
                 logs_by_task[task_key] = log_entry
 
-        ctx.info(f"Successfully retrieved log information for {len(logs_by_task)} tasks")
+        await ctx.info(f"Successfully retrieved log information for {len(logs_by_task)} tasks")
 
         return {
             "workflow_id": workflow_id,
@@ -1489,13 +1658,92 @@ async def get_workflow_logs(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching workflow logs: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error fetching workflow logs: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to fetch logs for workflow {workflow_id} in submission {submission_id}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
 # ===== GCS Read-Only Tools =====
+
+
+async def _get_one_entity(
+    workspace_namespace: str,
+    workspace_name: str,
+    entity_type: str,
+    entity_name: str,
+    columns: list[str] | None,
+    ctx: Context,
+) -> dict[str, Any]:
+    """Fetch exactly one entity by id, shaped like a one-row get_entities page.
+
+    Uses the single-entity endpoint rather than entityQuery's filterTerms,
+    because "does this row exist" must not depend on a substring search: a
+    filter that does not match the id would report a present row as missing,
+    which is how a pre-submission safety check turns into a wrong answer.
+    """
+    await ctx.info(
+        f"Fetching entity '{entity_name}' of type '{entity_type}' from "
+        f"{workspace_namespace}/{workspace_name}"
+    )
+    response = fapi.get_entity(workspace_namespace, workspace_name, entity_type, entity_name)
+
+    if response.status_code == 404:
+        # Absent, not an error: the caller asked whether it is there.
+        await ctx.info(f"No entity '{entity_name}' of type '{entity_type}'")
+        return {
+            "entity_type": entity_type,
+            "count": 0,
+            "entities": [],
+            "page": 1,
+            "page_size": 1,
+            "total_pages": 0,
+            "has_more": False,
+            "total_entities": None,
+            "matching_entities": 0,
+            "columns": columns,
+            "entity_name": entity_name,
+            "note": (
+                f"No row named '{entity_name}' in table '{entity_type}'. A wrong "
+                "entity_type or workspace reports the same way; "
+                "get_workspace_data_tables lists the tables that exist."
+            ),
+        }
+    if response.status_code == 403:
+        raise ToolError(
+            f"Access denied to workspace '{workspace_namespace}/{workspace_name}'. "
+            "You may not have permission to view this workspace."
+        )
+    if response.status_code != 200:
+        await _log_error(ctx, f"FISS API returned status {response.status_code}: {response.text}")
+        raise ToolError(
+            f"Failed to fetch entity '{entity_name}' (HTTP {response.status_code}). "
+            f"Details: {response.text}"
+        )
+
+    entity = response.json()
+    if columns:
+        wanted = set(columns)
+        entity["attributes"] = {
+            name: value
+            for name, value in (entity.get("attributes") or {}).items()
+            if name in wanted
+        }
+
+    return {
+        "entity_type": entity_type,
+        "count": 1,
+        "entities": [entity],
+        "page": 1,
+        "page_size": 1,
+        "total_pages": 1,
+        "has_more": False,
+        "total_entities": None,
+        "matching_entities": 1,
+        "columns": columns,
+        "entity_name": entity_name,
+    }
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
@@ -1525,6 +1773,11 @@ def _parse_gcs_uri(uri: str) -> tuple[str, str]:
 
     if not bucket:
         raise ToolError(f"Invalid GCS URI '{uri}': missing bucket name")
+
+    try:
+        gcs.validate_bucket(bucket)
+    except ValueError as exc:
+        raise ToolError(f"Invalid GCS URI '{uri}': {exc}") from exc
 
     return bucket, blob_name
 
@@ -1572,48 +1825,24 @@ async def list_gcs_objects(
     """
     try:
         bucket_name, prefix = _parse_gcs_uri(gcs_uri)
-        ctx.info(
+        await ctx.info(
             f"Listing objects in gs://{bucket_name}/{prefix} "
             f"(max {max_results}, recursive={recursive})"
         )
 
-        client = storage.Client()
-        delimiter = None if recursive else "/"
+        listing = gcs.list_objects(bucket_name, prefix, max_results, None if recursive else "/")
+        objects = listing["objects"]
+        prefixes = listing["prefixes"]
 
-        iterator = client.list_blobs(
-            bucket_name,
-            prefix=prefix if prefix else None,
-            max_results=max_results + 1,
-            delimiter=delimiter,
-        )
-
-        objects = []
-        truncated = False
-        for blob in iterator:
-            if len(objects) >= max_results:
-                truncated = True
-                break
-            objects.append(
-                {
-                    "name": blob.name,
-                    "size": blob.size,
-                    "content_type": blob.content_type,
-                    "updated": blob.updated.isoformat() if blob.updated else None,
-                    "md5_hash": blob.md5_hash,
-                }
-            )
-
-        prefixes = sorted(iterator.prefixes) if delimiter else []
-
-        ctx.info(f"Listed {len(objects)} objects, {len(prefixes)} prefixes")
+        await ctx.info(f"Listed {len(objects)} objects, {len(prefixes)} prefixes")
 
         return {
             "uri": gcs_uri,
             "bucket": bucket_name,
             "prefix": prefix,
             "objects": objects,
-            "prefixes": list(prefixes),
-            "truncated": truncated,
+            "prefixes": prefixes,
+            "truncated": listing["truncated"],
         }
 
     except ToolError:
@@ -1621,12 +1850,15 @@ async def list_gcs_objects(
     except NotFound:
         raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
     except Forbidden:
-        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
+        raise ToolError(_gcs_denied_message(gcs_uri))
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        print_msg = f"Failed to list GCS objects: {err_name}: {err_msg}"
-        ctx.error(print_msg)
+        print_msg = (
+            f"Failed to list GCS objects in {gcs_uri} "
+            f"({gcs.active_backend()} backend): {err_name}: {err_msg}"
+        )
+        await _log_error(ctx, print_msg)
         raise ToolError(print_msg)
 
 
@@ -1667,42 +1899,29 @@ async def get_gcs_object_metadata(
                 f"URI '{gcs_uri}' refers to a bucket, not an object. Include an object path."
             )
 
-        ctx.info(f"Fetching metadata for {gcs_uri}")
+        await ctx.info(f"Fetching metadata for {gcs_uri}")
 
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.get_blob(blob_name)
+        info = gcs.stat_object(bucket_name, blob_name)
 
-        if blob is None:
+        if info is None:
             raise ToolError(f"Object not found: {gcs_uri}")
 
-        return {
-            "uri": gcs_uri,
-            "bucket": bucket_name,
-            "name": blob.name,
-            "size": blob.size,
-            "content_type": blob.content_type,
-            "md5_hash": blob.md5_hash,
-            "crc32c": blob.crc32c,
-            "time_created": blob.time_created.isoformat() if blob.time_created else None,
-            "updated": blob.updated.isoformat() if blob.updated else None,
-            "generation": blob.generation,
-            "metageneration": blob.metageneration,
-            "storage_class": blob.storage_class,
-            "custom_metadata": blob.metadata or {},
-        }
+        return {"uri": gcs_uri, "bucket": bucket_name, **info}
 
     except ToolError:
         raise
     except NotFound:
         raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
     except Forbidden:
-        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
+        raise ToolError(_gcs_denied_message(gcs_uri))
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        print_msg = f"Failed to get metadata for {gcs_uri}: {err_name}: {err_msg}"
-        ctx.error(print_msg)
+        print_msg = (
+            f"Failed to get metadata for {gcs_uri} "
+            f"({gcs.active_backend()} backend): {err_name}: {err_msg}"
+        )
+        await _log_error(ctx, print_msg)
         raise ToolError(print_msg)
 
 
@@ -1761,16 +1980,15 @@ async def read_gcs_object(
         if offset < 0:
             raise ToolError(f"offset must be non-negative, got {offset}")
 
-        ctx.info(f"Reading {gcs_uri} (offset={offset}, max_bytes={max_bytes})")
+        await ctx.info(f"Reading {gcs_uri} (offset={offset}, max_bytes={max_bytes})")
 
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.get_blob(blob_name)
+        info = gcs.stat_object(bucket_name, blob_name)
 
-        if blob is None:
+        if info is None:
             raise ToolError(f"Object not found: {gcs_uri}")
 
-        size = blob.size or 0
+        size = info["size"] or 0
+        content_type = info["content_type"]
 
         if offset >= size:
             return {
@@ -1781,11 +1999,11 @@ async def read_gcs_object(
                 "truncated": False,
                 "encoding": "utf-8",
                 "content": "",
-                "content_type": blob.content_type,
+                "content_type": content_type,
             }
 
         end = offset + max_bytes - 1
-        data = blob.download_as_bytes(start=offset, end=end)
+        data = gcs.read_range(bucket_name, blob_name, offset, end, info["generation"])
         bytes_read = len(data)
         truncated = (offset + bytes_read) < size
 
@@ -1799,7 +2017,7 @@ async def read_gcs_object(
                 "truncated": truncated,
                 "encoding": "utf-8",
                 "content": text,
-                "content_type": blob.content_type,
+                "content_type": content_type,
             }
         except UnicodeDecodeError:
             return {
@@ -1810,7 +2028,7 @@ async def read_gcs_object(
                 "truncated": truncated,
                 "encoding": "base64",
                 "content_base64": base64.b64encode(data).decode("ascii"),
-                "content_type": blob.content_type,
+                "content_type": content_type,
             }
 
     except ToolError:
@@ -1818,12 +2036,15 @@ async def read_gcs_object(
     except NotFound:
         raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
     except Forbidden:
-        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
+        raise ToolError(_gcs_denied_message(gcs_uri))
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        print_msg = f"Failed to read GCS object {gcs_uri}: {err_name}: {err_msg}"
-        ctx.error(print_msg)
+        print_msg = (
+            f"Failed to read GCS object {gcs_uri} "
+            f"({gcs.active_backend()} backend): {err_name}: {err_msg}"
+        )
+        await _log_error(ctx, print_msg)
         raise ToolError(print_msg)
 
 
@@ -1846,8 +2067,9 @@ async def download_gcs_file(
     - Refuses to write if local_path already exists unless overwrite=True.
     - Refuses to write if download would consume more than 90% of free disk
       space at the destination, unless skip_disk_check=True.
-    - Verifies downloaded size matches GCS metadata; deletes partial file on
-      mismatch.
+    - Transfers to a temporary file alongside the destination and renames it
+      only after the size is verified against GCS metadata, so a failed or
+      short transfer never leaves a partial file at local_path.
     - Auto-creates parent directories (os.makedirs exist_ok=True).
 
     Cost note: GCS egress charges apply per byte downloaded. Large files cost
@@ -1870,6 +2092,7 @@ async def download_gcs_file(
     """
     import os
     import shutil
+    import tempfile
 
     try:
         bucket_name, blob_name = _parse_gcs_uri(gcs_uri)
@@ -1886,21 +2109,19 @@ async def download_gcs_file(
                 f"Local path '{local_path}' already exists. Pass overwrite=True to replace."
             )
 
-        ctx.info(f"Preparing download {gcs_uri} -> {local_path}")
+        await ctx.info(f"Preparing download {gcs_uri} -> {local_path}")
 
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.get_blob(blob_name)
+        info = gcs.stat_object(bucket_name, blob_name)
 
-        if blob is None:
+        if info is None:
             raise ToolError(f"Object not found: {gcs_uri}")
 
-        size = blob.size or 0
+        size = info["size"] or 0
 
         parent = os.path.dirname(local_path)
         if parent and not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
-            ctx.info(f"Created parent directory {parent}")
+            await ctx.info(f"Created parent directory {parent}")
 
         if not skip_disk_check and size > 0:
             check_dir = parent if parent and os.path.exists(parent) else "/"
@@ -1912,26 +2133,75 @@ async def download_gcs_file(
                     "Free space first or pass skip_disk_check=True to override."
                 )
 
-        ctx.info(f"Downloading {size:,} bytes from {gcs_uri}")
+        await ctx.info(f"Downloading {size:,} bytes from {gcs_uri}")
 
-        blob.download_to_filename(local_path)
+        # Transfer into a sibling temp file and rename on success, so a stream
+        # that dies mid-download cannot leave a truncated file at local_path
+        # (which a later retry would refuse, or overwrite=True would have
+        # already clobbered). Pinned to the generation whose size was checked.
+        handle, temp_path = tempfile.mkstemp(
+            dir=parent, prefix=f".{os.path.basename(local_path)}.", suffix=".partial"
+        )
+        os.close(handle)
+        try:
+            gcs.download(bucket_name, blob_name, temp_path, info["generation"])
 
-        actual_size = os.path.getsize(local_path)
-        if size > 0 and actual_size != size:
-            os.remove(local_path)
-            raise ToolError(
-                f"Downloaded size {actual_size} does not match expected {size}. "
-                "Partial file deleted."
-            )
+            actual_size = os.path.getsize(temp_path)
+            if size > 0 and actual_size != size:
+                raise ToolError(
+                    f"Downloaded size {actual_size} does not match expected {size}. "
+                    "Partial file discarded."
+                )
 
-        ctx.info(f"Successfully downloaded {actual_size:,} bytes to {local_path}")
+            # mkstemp creates the file 0600. Downloads used to go through a
+            # normal open() and honour the umask, so restore that: a file
+            # fetched into a shared directory has to stay readable there.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(temp_path, 0o666 & ~umask)
+
+            if overwrite:
+                os.replace(temp_path, local_path)
+            else:
+                # os.replace would silently clobber a file that appeared during
+                # the transfer, so publish in a way that fails if the
+                # destination now exists.
+                raced = ToolError(
+                    f"Local path '{local_path}' was created while the download was "
+                    "in progress. Pass overwrite=True to replace it."
+                )
+                try:
+                    os.link(temp_path, local_path)
+                except FileExistsError:
+                    raise raced from None
+                except OSError:
+                    # Hard links are unavailable on SMB, exFAT and some FUSE
+                    # mounts, where the destination may well live. An exclusive
+                    # create plus a copy keeps the same no-clobber guarantee.
+                    try:
+                        destination = os.open(
+                            local_path,
+                            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                            0o666 & ~umask,
+                        )
+                    except FileExistsError:
+                        raise raced from None
+                    with open(destination, "wb") as target, open(temp_path, "rb") as source:
+                        shutil.copyfileobj(source, target)
+                os.remove(temp_path)
+        except BaseException:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+        await ctx.info(f"Successfully downloaded {actual_size:,} bytes to {local_path}")
 
         return {
             "source_uri": gcs_uri,
             "local_path": local_path,
             "bytes_downloaded": actual_size,
-            "md5_hash": blob.md5_hash,
-            "content_type": blob.content_type,
+            "md5_hash": info["md5_hash"],
+            "content_type": info["content_type"],
         }
 
     except ToolError:
@@ -1939,12 +2209,15 @@ async def download_gcs_file(
     except NotFound:
         raise ToolError(f"Bucket or prefix not found: {gcs_uri}")
     except Forbidden:
-        raise ToolError(f"Access denied to {gcs_uri}. Check bucket permissions.")
+        raise ToolError(_gcs_denied_message(gcs_uri))
     except Exception as e:
         err_name = type(e).__name__
         err_msg = str(e)
-        print_msg = f"Failed to download GCS file {gcs_uri}: {err_name}: {err_msg}"
-        ctx.error(print_msg)
+        print_msg = (
+            f"Failed to download GCS file {gcs_uri} "
+            f"({gcs.active_backend()} backend): {err_name}: {err_msg}"
+        )
+        await _log_error(ctx, print_msg)
         raise ToolError(print_msg)
 
 
@@ -1998,7 +2271,7 @@ async def list_submissions(
         - workflows: Array of workflow details (IDs and statuses)
     """
     try:
-        ctx.info(f"Listing submissions for workspace {workspace_namespace}/{workspace_name}")
+        await ctx.info(f"Listing submissions for workspace {workspace_namespace}/{workspace_name}")
 
         response = fapi.list_submissions(workspace_namespace, workspace_name)
 
@@ -2013,14 +2286,16 @@ async def list_submissions(
                 "You may not have permission to view this workspace."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to list submissions (HTTP {response.status_code}). "
                 "Please check the workspace exists and you have access."
             )
 
         submissions = response.json()
-        ctx.info(f"Retrieved {len(submissions)} total submissions from API")
+        await ctx.info(f"Retrieved {len(submissions)} total submissions from API")
 
         # Sort submissions by date descending (most recent first)
         submissions.sort(key=lambda s: s.get("submissionDate", ""), reverse=True)
@@ -2030,13 +2305,15 @@ async def list_submissions(
 
         if status:
             filtered_submissions = [s for s in filtered_submissions if s.get("status") == status]
-            ctx.info(f"Filtered to {len(filtered_submissions)} submissions with status={status}")
+            await ctx.info(
+                f"Filtered to {len(filtered_submissions)} submissions with status={status}"
+            )
 
         if submitter:
             filtered_submissions = [
                 s for s in filtered_submissions if s.get("submitter") == submitter
             ]
-            ctx.info(
+            await ctx.info(
                 f"Filtered to {len(filtered_submissions)} submissions from submitter={submitter}"
             )
 
@@ -2044,7 +2321,7 @@ async def list_submissions(
             filtered_submissions = [
                 s for s in filtered_submissions if s.get("methodConfigurationName") == workflow_name
             ]
-            ctx.info(
+            await ctx.info(
                 f"Filtered to {len(filtered_submissions)} submissions "
                 f"with workflow_name={workflow_name}"
             )
@@ -2052,21 +2329,22 @@ async def list_submissions(
         # Apply pagination
         if limit is not None and limit > 0:
             paginated_submissions = filtered_submissions[:limit]
-            ctx.info(
+            await ctx.info(
                 f"Returning {len(paginated_submissions)} of {len(filtered_submissions)} "
                 f"submissions (limit={limit})"
             )
             return paginated_submissions
         else:
-            ctx.info(f"Returning all {len(filtered_submissions)} filtered submissions")
+            await ctx.info(f"Returning all {len(filtered_submissions)} filtered submissions")
             return filtered_submissions
 
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error listing submissions: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error listing submissions: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to list submissions for workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2109,7 +2387,7 @@ async def get_workflow_outputs(
     or debug subworkflows independently.
     """
     try:
-        ctx.info(f"Fetching outputs for workflow {workflow_id} in submission {submission_id}")
+        await ctx.info(f"Fetching outputs for workflow {workflow_id} in submission {submission_id}")
 
         response = fapi.get_workflow_outputs(
             workspace_namespace,
@@ -2130,23 +2408,28 @@ async def get_workflow_outputs(
                 "You may not have permission to view this workflow."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch workflow outputs (HTTP {response.status_code}). "
                 "Please check the workspace and workflow IDs."
             )
 
         outputs = response.json()
-        ctx.info(f"Successfully retrieved outputs for workflow {workflow_id}")
+        await ctx.info(f"Successfully retrieved outputs for workflow {workflow_id}")
 
         return outputs
 
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching workflow outputs: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error fetching workflow outputs: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to fetch outputs for workflow {workflow_id} in submission {submission_id}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2191,7 +2474,7 @@ async def get_workflow_cost(
     or debug subworkflows independently.
     """
     try:
-        ctx.info(f"Fetching cost for workflow {workflow_id} in submission {submission_id}")
+        await ctx.info(f"Fetching cost for workflow {workflow_id} in submission {submission_id}")
 
         response = fapi.get_workflow_cost(
             workspace_namespace,
@@ -2212,23 +2495,26 @@ async def get_workflow_cost(
                 "You may not have permission to view this workflow."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch workflow cost (HTTP {response.status_code}). "
                 "Please check the workspace and workflow IDs."
             )
 
         cost_data = response.json()
-        ctx.info(f"Successfully retrieved cost information for workflow {workflow_id}")
+        await ctx.info(f"Successfully retrieved cost information for workflow {workflow_id}")
 
         return cost_data
 
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching workflow cost: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error fetching workflow cost: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to fetch cost for workflow {workflow_id} in submission {submission_id}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2314,7 +2600,9 @@ async def get_batch_job_status(
     or debug subworkflows independently.
     """
     try:
-        ctx.info(f"Fetching Batch job status for task '{task_name}' in workflow {workflow_id}")
+        await ctx.info(
+            f"Fetching Batch job status for task '{task_name}' in workflow {workflow_id}"
+        )
 
         # Step 1: Fetch workflow metadata to get the jobId
         # Exclude large fields we don't need
@@ -2338,7 +2626,9 @@ async def get_batch_job_status(
                 "You may not have permission to view this workflow."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(f"Failed to fetch workflow metadata (HTTP {response.status_code}).")
 
         metadata = response.json()
@@ -2429,7 +2719,7 @@ async def get_batch_job_status(
                 f"Available metadata fields: {available_fields}"
             )
 
-        ctx.info(f"Found Batch job ID: {job_id}")
+        await ctx.info(f"Found Batch job ID: {job_id}")
 
         # Step 5: Query Google Batch API
         try:
@@ -2449,8 +2739,8 @@ async def get_batch_job_status(
                     "Check your GCP project permissions."
                 )
             else:
-                ctx.error(f"Batch API error: {type(e).__name__}: {e}")
-                raise ToolError(f"Failed to fetch Batch job status: {type(e).__name__}")
+                await _log_error(ctx, f"Batch API error: {type(e).__name__}: {e}")
+                raise ToolError(f"Failed to fetch Batch job status: {type(e).__name__}: {e}")
 
         # Step 6: Parse and analyze results
         parsed_status = _parse_batch_job_status(batch_job)
@@ -2491,9 +2781,12 @@ async def get_batch_job_status(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching Batch job status: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error fetching Batch job status: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to fetch Batch job status for task '{task_name}' in workflow {workflow_id}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2506,43 +2799,130 @@ async def get_entities(
     workspace_name: Annotated[str, "Terra workspace name"],
     entity_type: Annotated[str, "Entity type to retrieve (e.g., 'sample', 'participant')"],
     ctx: Context,
+    columns: Annotated[
+        list[str] | None,
+        "Attribute names to return, e.g. ['cram_path', 'cram_index']. "
+        "Omit to return every column, which on a wide table is rarely what you want. "
+        "Available names come from get_workspace_data_tables.",
+    ] = None,
+    page: Annotated[int, "1-indexed page number"] = 1,
+    page_size: Annotated[int, "Rows per page, 1 to 1000"] = 100,
+    entity_name: Annotated[
+        str | None,
+        "Fetch exactly this one row by its entity name, the table's id column. "
+        "The definitive existence check: an exact lookup, not a text search, and "
+        "a missing row comes back as an empty result rather than an error.",
+    ] = None,
+    filter_terms: Annotated[
+        str | None,
+        "Space-separated text matched against the rows. A substring search, so "
+        "use entity_name when you know the exact id you want.",
+    ] = None,
+    max_response_bytes: Annotated[
+        int,
+        "Refuse pages whose JSON exceeds this size, with advice on narrowing the "
+        "query. 0 disables the check.",
+    ] = DEFAULT_MAX_ENTITY_RESPONSE_BYTES,
 ) -> dict[str, Any]:
-    """Get all entities of a specific type from a Terra data table.
+    """Read one page of rows from a Terra data table.
 
-    Entities represent rows in Terra data tables and are used as workflow inputs.
-    This tool retrieves all entities of a given type along with their attributes.
+    Entities are rows in Terra data tables and are used as workflow inputs. This
+    tool returns a single page, so it is safe on tables of any size.
 
-    **CONTEXT WARNING FOR LARGE TABLES:**
-    Data tables can contain thousands of entities, each with many attributes.
-    Before calling this tool, use get_workspace_data_tables to check row counts.
-    For tables with 100+ entities, consider whether you truly need all data,
-    or if you can work with specific entity names from workflow inputs instead.
+    **Fetch the narrowest thing that answers the question.** A realistic table
+    can be thousands of rows by a hundred-plus columns, which neither Terra nor
+    a context window handles well:
+
+    0. Checking whether one specific row exists, or reading it? Pass
+       `entity_name`. That is an exact lookup by the table's id, so an empty
+       result means the row genuinely is not there. Never conclude that from a
+       page of results or from `filter_terms`, which is a substring search.
+    1. Call get_workspace_data_tables first. It reports each table's row count
+       and its column names.
+    2. Pass `columns` with only the attributes you need. This is the difference
+       that matters most on a wide table: on a real 163-column table, one page
+       of 100 rows is 1.08 MB with every column and 28 KB with two. Pages over
+       `max_response_bytes` are refused rather than returned.
+    3. Looking for specific rows? Pass `filter_terms` instead of paging through
+       the table to find them.
+    4. Need everything? Page with `page` and `page_size`, using `total_pages`
+       from the response, and stop as soon as you have what you need.
 
     Common use cases:
-    - Retrieve sample/participant data for workflow submission
-    - Verify entity attributes before launching workflows
-    - Inspect data table contents
+    - Read two path columns for a set of samples to launch a workflow
+    - Find one row by sample name with filter_terms
+    - Inspect a table's shape before deciding what to pull
 
     Args:
         workspace_namespace: The billing namespace of the workspace
         workspace_name: The name of the workspace
         entity_type: The entity type to retrieve (matches data table name)
+        entity_name: Exact entity id to fetch. Returns 0 or 1 rows and ignores
+            page, page_size and filter_terms.
+        columns: Attribute names to include. None returns all attributes.
+        page: 1-indexed page number (default 1)
+        page_size: Rows per page, 1 to 1000 (default 100)
+        filter_terms: Space-separated text to match rows against
+        max_response_bytes: Reject a page whose JSON exceeds this size, rather
+            than returning it (default 250,000; 0 disables). A wide table
+            returns about 1 MB per 100 rows when no columns are selected.
 
     Returns:
         Dictionary containing:
         - entity_type: The entity type requested
-        - count: Number of entities returned
+        - count: Number of entities on this page
         - entities: List of entity objects with name, entityType, and attributes
+        - page, page_size: The page returned
+        - total_pages: Pages available at this page_size
+        - has_more: True if further pages exist
+        - total_entities: Rows in the table, before any filter_terms
+        - matching_entities: Rows matching filter_terms (equal to total_entities
+          when no filter is given)
+        - columns: The column selection applied, or None if all were returned
     """
     try:
-        ctx.info(
-            f"Fetching entities of type '{entity_type}' from workspace "
+        # An empty list selects nothing, which Terra reads as "every attribute";
+        # normalise so the request and the echoed `columns` field agree.
+        columns = columns or None
+
+        if page < 1:
+            raise ToolError(f"page must be 1 or greater, got {page}")
+        if not 1 <= page_size <= MAX_ENTITY_PAGE_SIZE:
+            raise ToolError(
+                f"page_size must be between 1 and {MAX_ENTITY_PAGE_SIZE}, got {page_size}"
+            )
+
+        if entity_name:
+            return await _get_one_entity(
+                workspace_namespace, workspace_name, entity_type, entity_name, columns, ctx
+            )
+
+        await ctx.info(
+            f"Fetching page {page} ({page_size} rows) of '{entity_type}' from "
             f"{workspace_namespace}/{workspace_name}"
+            + (f", columns={columns}" if columns else ", all columns")
         )
 
-        response = fapi.get_entities(workspace_namespace, workspace_name, entity_type)
+        # entityQuery, not the unpaginated entities endpoint: that one returns
+        # every row of every column in one response and times out on real tables.
+        response = fapi.get_entities_query(
+            workspace_namespace,
+            workspace_name,
+            entity_type,
+            page=page,
+            page_size=page_size,
+            filter_terms=filter_terms,
+            fields=",".join(columns) if columns else None,
+        )
 
-        if response.status_code == 404:
+        if response.status_code == 400:
+            raise ToolError(
+                f"Terra rejected the query for '{entity_type}' (HTTP 400). "
+                "A column name that does not exist on the table is the usual cause; "
+                "get_workspace_data_tables lists the valid names. "
+                f"Details: {response.text}"
+            )
+        elif response.status_code == 404:
             raise ToolError(
                 f"Workspace '{workspace_namespace}/{workspace_name}' or entity type "
                 f"'{entity_type}' not found. Please verify the workspace and entity type are correct."
@@ -2553,28 +2933,67 @@ async def get_entities(
                 "You may not have permission to view this workspace."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch entities (HTTP {response.status_code}). "
                 "Please check the workspace and entity type."
             )
 
-        entities = response.json()
-        ctx.info(f"Successfully retrieved {len(entities)} entities of type '{entity_type}'")
+        payload = response.json()
+        entities = payload.get("results", [])
+
+        # Terra answers a wide table quickly; it is the volume that is unusable.
+        if max_response_bytes and entities:
+            response_bytes = len(json.dumps(entities, default=str))
+            if response_bytes > max_response_bytes:
+                # Terra omits unset attributes per row, so this is the first
+                # row's width, not the table's; the table may have more columns.
+                attribute_count = len(entities[0].get("attributes", {}))
+                raise ToolError(
+                    f"This page is {response_bytes:,} bytes, over the "
+                    f"{max_response_bytes:,} byte limit: {len(entities)} rows, "
+                    f"{attribute_count} attributes on the first row. Narrow the query "
+                    "rather than "
+                    "loading this into context. Pass columns=[...] with just the "
+                    "attributes you need (get_workspace_data_tables lists the names "
+                    "for this table), reduce page_size, or raise max_response_bytes "
+                    "if you genuinely need all of it."
+                )
+        metadata = payload.get("resultMetadata") or {}
+        total_entities = metadata.get("unfilteredCount")
+        matching_entities = metadata.get("filteredCount", total_entities)
+        total_pages = metadata.get("filteredPageCount")
+        if total_pages is None and isinstance(matching_entities, int):
+            total_pages = -(-matching_entities // page_size)  # ceiling division
+
+        await ctx.info(
+            f"Retrieved {len(entities)} entities of type '{entity_type}' "
+            f"(page {page} of {total_pages if total_pages is not None else '?'})"
+        )
 
         return {
             "entity_type": entity_type,
             "count": len(entities),
             "entities": entities,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_more": bool(total_pages is not None and page < total_pages),
+            "total_entities": total_entities,
+            "matching_entities": matching_entities,
+            "columns": columns,
         }
 
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching entities: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error fetching entities: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to fetch entities of type '{entity_type}' from workspace "
             f"{workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2615,7 +3034,7 @@ async def get_method_config(
         - outputs: Output mappings (WDL output -> entity attribute)
     """
     try:
-        ctx.info(
+        await ctx.info(
             f"Fetching method configuration '{config_namespace}/{config_name}' "
             f"from workspace {workspace_namespace}/{workspace_name}"
         )
@@ -2636,14 +3055,16 @@ async def get_method_config(
                 "You may not have permission to view this configuration."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to fetch method configuration (HTTP {response.status_code}). "
                 "Please check the workspace and configuration names."
             )
 
         config = response.json()
-        ctx.info(
+        await ctx.info(
             f"Successfully retrieved method configuration '{config_name}' "
             f"(WDL version: {config.get('methodRepoMethod', {}).get('methodVersion', 'unknown')})"
         )
@@ -2653,10 +3074,13 @@ async def get_method_config(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error fetching method configuration: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error fetching method configuration: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to fetch method configuration '{config_namespace}/{config_name}' "
             f"from workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2698,10 +3122,10 @@ async def update_method_config(
         Updated method configuration dictionary
     """
     # Check if write operations are allowed
-    _check_write_access(ctx)
+    await _check_write_access(ctx)
 
     try:
-        ctx.info(
+        await ctx.info(
             f"Updating method configuration '{config_namespace}/{config_name}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
         )
@@ -2722,24 +3146,29 @@ async def update_method_config(
                 "You may not have permission to modify this configuration."
             )
         elif response.status_code != 200:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to update method configuration (HTTP {response.status_code}). "
                 "Please check the workspace, configuration names, and update body."
             )
 
         updated_config = response.json()
-        ctx.info(f"Successfully updated method configuration '{config_name}'")
+        await ctx.info(f"Successfully updated method configuration '{config_name}'")
 
         return updated_config
 
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error updating method configuration: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error updating method configuration: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to update method configuration '{config_namespace}/{config_name}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2775,10 +3204,10 @@ async def copy_method_config(
         The newly created method configuration dictionary
     """
     # Check if write operations are allowed
-    _check_write_access(ctx)
+    await _check_write_access(ctx)
 
     try:
-        ctx.info(
+        await ctx.info(
             f"Copying method configuration '{from_config_namespace}/{from_config_name}' "
             f"to '{to_config_namespace}/{to_config_name}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
@@ -2809,14 +3238,16 @@ async def copy_method_config(
                 "already exists. Please choose a different name."
             )
         elif response.status_code not in [200, 201]:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to copy method configuration (HTTP {response.status_code}). "
                 "Please check the configuration names and permissions."
             )
 
         new_config = response.json()
-        ctx.info(
+        await ctx.info(
             f"Successfully copied method configuration to '{to_config_namespace}/{to_config_name}'"
         )
 
@@ -2825,10 +3256,13 @@ async def copy_method_config(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error copying method configuration: {type(e).__name__}: {e}")
+        await _log_error(
+            ctx, f"Unexpected error copying method configuration: {type(e).__name__}: {e}"
+        )
         raise ToolError(
             f"Failed to copy method configuration from '{from_config_namespace}/{from_config_name}' "
             f"to '{to_config_namespace}/{to_config_name}'"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2880,10 +3314,10 @@ async def submit_workflow(
         - submissionDate: When the submission was created
     """
     # Check if write operations are allowed
-    _check_write_access(ctx)
+    await _check_write_access(ctx)
 
     try:
-        ctx.info(
+        await ctx.info(
             f"Submitting workflow '{config_namespace}/{config_name}' "
             f"for entity type '{entity_type}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
@@ -2911,21 +3345,23 @@ async def submit_workflow(
                 "You may not have permission to submit workflows."
             )
         elif response.status_code == 400:
-            ctx.error(f"Bad request: {response.text}")
+            await _log_error(ctx, f"Bad request: {response.text}")
             raise ToolError(
                 f"Failed to submit workflow (HTTP 400). Common issues: "
                 "invalid entity type, missing inputs, or configuration errors. "
                 f"Details: {response.text}"
             )
         elif response.status_code not in [200, 201]:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to submit workflow (HTTP {response.status_code}). "
                 "Please check the configuration and entity."
             )
 
         submission = response.json()
-        ctx.info(
+        await ctx.info(
             f"Successfully submitted workflow. Submission ID: {submission.get('submissionId')}"
         )
 
@@ -2934,10 +3370,11 @@ async def submit_workflow(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error submitting workflow: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error submitting workflow: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to submit workflow '{config_namespace}/{config_name}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -2969,10 +3406,10 @@ async def abort_submission(
         - status: Confirmation that abort was requested
     """
     # Check if write operations are allowed
-    _check_write_access(ctx)
+    await _check_write_access(ctx)
 
     try:
-        ctx.info(
+        await ctx.info(
             f"Aborting submission '{submission_id}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
         )
@@ -2991,19 +3428,21 @@ async def abort_submission(
                 "You may not have permission to abort submissions."
             )
         elif response.status_code == 400:
-            ctx.error(f"Bad request: {response.text}")
+            await _log_error(ctx, f"Bad request: {response.text}")
             raise ToolError(
                 f"Failed to abort submission (HTTP 400). The submission may already be "
                 f"completed or in a state that cannot be aborted. Details: {response.text}"
             )
         elif response.status_code not in [200, 204]:
-            ctx.error(f"FISS API returned status {response.status_code}: {response.text}")
+            await _log_error(
+                ctx, f"FISS API returned status {response.status_code}: {response.text}"
+            )
             raise ToolError(
                 f"Failed to abort submission (HTTP {response.status_code}). "
                 "Please check the submission ID and workspace."
             )
 
-        ctx.info(f"Successfully requested abort for submission '{submission_id}'")
+        await ctx.info(f"Successfully requested abort for submission '{submission_id}'")
 
         return {
             "submission_id": submission_id,
@@ -3014,10 +3453,11 @@ async def abort_submission(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error aborting submission: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error aborting submission: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to abort submission '{submission_id}' "
             f"in workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -3101,7 +3541,7 @@ async def upload_entities(
         doesn't re-apply them.
     """
     # Check if write operations are allowed
-    _check_write_access(ctx)
+    await _check_write_access(ctx)
 
     try:
         # Validate entity_data
@@ -3160,7 +3600,7 @@ async def upload_entities(
         for entity in entity_data:
             names_by_type.setdefault(entity["entityType"], []).append(entity["name"])
 
-        ctx.info(
+        await ctx.info(
             f"Uploading {len(entity_data)} entities "
             f"({', '.join(f'{t}={len(n)}' for t, n in names_by_type.items())}) "
             f"to workspace {workspace_namespace}/{workspace_name}"
@@ -3180,9 +3620,10 @@ async def upload_entities(
                 workspace_namespace, workspace_name, create_tsv, model="flexible"
             )
             if create_response.status_code not in (200, 201, 204):
-                ctx.error(
+                await _log_error(
+                    ctx,
                     f"Loadfile import for entity type '{etype}' returned "
-                    f"{create_response.status_code}: {create_response.text}"
+                    f"{create_response.status_code}: {create_response.text}",
                 )
                 # This is the first API call the tool makes, so a bad workspace
                 # or a missing write grant surfaces here rather than on the
@@ -3265,16 +3706,17 @@ async def upload_entities(
                     f"{_already_written()}"
                 )
             elif response.status_code == 400:
-                ctx.error(f"Bad request for entity '{entity['name']}': {response.text}")
+                await _log_error(ctx, f"Bad request for entity '{entity['name']}': {response.text}")
                 raise ToolError(
                     f"Failed to upload entity '{entity['name']}' (HTTP 400). Common issues: "
                     "invalid attribute values or a malformed entity reference. "
                     f"Details: {response.text} {_already_written()}"
                 )
             elif response.status_code not in (200, 201, 204):
-                ctx.error(
+                await _log_error(
+                    ctx,
                     f"FISS API returned status {response.status_code} for entity "
-                    f"'{entity['name']}': {response.text}"
+                    f"'{entity['name']}': {response.text}",
                 )
                 raise ToolError(
                     f"Failed to upload entity '{entity['name']}' "
@@ -3288,7 +3730,7 @@ async def upload_entities(
         entity_types = {etype: len(names) for etype, names in names_by_type.items()}
         type_summary = ", ".join(f"{t}={c}" for t, c in entity_types.items())
 
-        ctx.info(
+        await ctx.info(
             f"Successfully uploaded {len(entity_data)} entities ({type_summary}) "
             f"to {workspace_namespace}/{workspace_name}"
         )
@@ -3303,9 +3745,10 @@ async def upload_entities(
     except ToolError:
         raise
     except Exception as e:
-        ctx.error(f"Unexpected error uploading entities: {type(e).__name__}: {e}")
+        await _log_error(ctx, f"Unexpected error uploading entities: {type(e).__name__}: {e}")
         raise ToolError(
             f"Failed to upload entities to workspace {workspace_namespace}/{workspace_name}"
+            f" Underlying error: {type(e).__name__}: {e}"
         )
 
 
@@ -3328,6 +3771,10 @@ Examples:
 
   # Enable write operations
   python -m terra_mcp.server --allow-writes
+
+  # Force the GCS XML API (per-bucket hostnames) for sandboxes that block
+  # storage.googleapis.com, such as Claude Science
+  python -m terra_mcp.server --gcs-backend xml
         """,
     )
     parser.add_argument(
@@ -3337,7 +3784,20 @@ Examples:
         "Without this flag, the server runs in read-only mode for safety.",
     )
 
+    parser.add_argument(
+        "--gcs-backend",
+        choices=gcs.BACKENDS,
+        default="auto",
+        help="How to reach Google Cloud Storage. 'json' uses google-cloud-storage "
+        "(storage.googleapis.com). 'xml' uses the GCS XML API on per-bucket hostnames "
+        "({bucket}.storage.googleapis.com), the only route available inside the Claude "
+        "Science sandbox. 'auto' (default) tries JSON and falls back to XML if that "
+        "host is unreachable.",
+    )
+
     args = parser.parse_args()
+
+    gcs.set_backend(args.gcs_backend)
 
     # Set write access flag based on command-line argument
     ALLOW_WRITES = args.allow_writes
@@ -3355,6 +3815,8 @@ Examples:
             flush=True,
         )
         print("  Use --allow-writes flag to enable write operations", file=sys.stderr, flush=True)
+
+    print(f"GCS backend: {args.gcs_backend}", file=sys.stderr, flush=True)
 
     # Run server with stdio transport (compatible with Claude Desktop)
     mcp.run()

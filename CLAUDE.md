@@ -59,13 +59,54 @@ python -m terra_mcp.server --allow-writes
 All planned tools have been successfully implemented following test-driven development (TDD) principles.
 
 ### Workspace & Data Discovery (4 tools)
-1. ✅ `list_workspaces` - List user's accessible Terra workspaces
+1. ✅ `list_workspaces` - List the account's accessible Terra workspaces
+   - `name_contains` (case-insensitive substring on the name), `namespace`
+     (exact, case-insensitive) and `limit` (default 100, None for all); rows are
+     sorted by namespace then name
+   - Requests only four fields via `fapi.list_workspaces(fields=...)`. Without
+     it Terra builds and transfers the complete object for every workspace an
+     account can see and the tool discards nearly all of it. Measured on a
+     2,239-workspace account: **20,746,328 bytes without `fields`, 433,923
+     with** (18 keys per workspace down to 4), so this call was slow for the
+     same reason `get_entities` was, volume rather than latency. A 400 falls
+     back to an unfiltered request (issue #16)
+   - Returns a dict (`workspaces`, `count`, `matching`, `total_accessible`,
+     `truncated`, `filters`), not a bare list
 2. ✅ `get_workspace_metadata` - Get workspace metadata and attributes for dashboard documentation
    - Returns dashboard description (markdown), custom attributes/tags, bucket name, Google project, workspace ID, creator/timestamps, lock state, normalized authorization domain group names, and caller's access level
    - Wraps `fapi.get_workspace` (HTTP GET, read-only by design)
 3. ✅ `get_workspace_data_tables` - List data tables in a workspace
-4. ✅ `get_entities` - Read entity data from Terra data tables
-   - Returns all entities of specified type with attributes
+   - Returns row count plus `columns`/`column_count` per table, which are the names
+     to pass to `get_entities(columns=[...])` without first fetching a row
+4. ✅ `get_entities` - Read one page of rows from a Terra data table
+   - Wraps `fapi.get_entities_query` (the `entityQuery` endpoint), **not**
+     `fapi.get_entities` (issue #15)
+   - `entity_name` does an exact single-row lookup via `fapi.get_entity`, which
+     is the only correct way to answer "does this row exist": `filter_terms` is
+     a substring search, so a miss does not prove absence, and a missing row
+     returns an empty result rather than an error
+   - `columns=[...]` selects attributes (maps to the API's `fields`), `page` and
+     `page_size` (max 1000) paginate, `filter_terms` text-matches rows
+   - Response carries `total_pages`, `has_more`, `total_entities` and
+     `matching_entities` so an agent can decide whether to keep paging
+   - HTTP 400 is reported separately, since an unknown column name is the usual
+     cause and the message points at `get_workspace_data_tables`
+   - **The problem was size, not latency.** Measured against
+     `broad-firecloud-dsde-methods/sr-malaria`, table `sample`, 3,473 rows x 163
+     attributes:
+
+     | Call | Time | Bytes |
+     |---|---|---|
+     | `fapi.get_entities` (old, whole table) | 2.8 s | 37,094,614 |
+     | one page, all columns | 0.2 s | 1,081,058 |
+     | one page, 2 columns | 0.3 s | 28,444 |
+     | `filter_terms="3D7"` (94 matches) | 1.1 s | 27,372 |
+
+     Terra was never slow; the 60 s client timeout was 37 MB in transit. Paging
+     alone is therefore not enough: one page of every column is still ~1 MB,
+     roughly 270k tokens, so `max_response_bytes` (default 250,000, 0 disables)
+     refuses an oversized page with instructions to pass `columns`, lower
+     `page_size`, or raise the limit deliberately
 
 ### Workflow Monitoring & Status (7 tools)
 4. ✅ `list_submissions` - List all submissions in a workspace
@@ -152,7 +193,17 @@ All planned tools have been successfully implemented following test-driven devel
 20. ✅ `download_gcs_file` - Stream a complete GCS file to local disk
     - Safety: refuses to overwrite existing files unless `overwrite=True`
     - Safety: refuses if download would consume >90% of free disk space unless `skip_disk_check=True`
-    - Safety: verifies downloaded size matches GCS metadata, deletes partial file on mismatch
+    - Safety: transfers to a temp file beside the destination and publishes it
+      only after the size matches GCS metadata, so a failed or short transfer
+      never leaves a partial file at `local_path`
+    - Publishing honours the umask (`mkstemp` would otherwise leave every
+      download mode 0600) and uses `os.link` when `overwrite=False`, so a file
+      that appears during the transfer is not silently clobbered by `os.replace`
+    - Both backends move the object's *stored* bytes (`raw_download` / undecoded
+      stream), so a range lines up with the stored length even for an object
+      with `Content-Encoding: gzip`; `get_workflow_logs` still decodes text
+    - Reads and downloads are pinned to the generation reported by the preceding
+      stat, so an overwrite mid-call cannot mix sizes, hashes and bytes
     - Auto-creates parent directories via `os.makedirs(exist_ok=True)`
     - Suitable for files too large for context (BAMs, FASTQs, large VCFs)
 
@@ -169,6 +220,21 @@ All planned tools have been successfully implemented following test-driven devel
 - **Workflow**: Individual WDL execution within a submission
 - **Job**: Individual task execution within a workflow
 
+### Portability: what is and is not Terra-deployment specific
+
+- **The API host is not hardcoded.** Every call goes through FISS, which reads
+  `root_url` from `[DEFAULT]` in `~/.fissconfig` (or `./.fissconfig`) and
+  defaults to `https://api.firecloud.org/api/`. Verified: a `.fissconfig` with
+  `root_url` set is honoured by `fccore.config_parse()`. Nothing in this
+  repository assumes one institution's Terra.
+- **Google-backed workspaces are assumed by two tool groups.** The GCS tools and
+  `get_batch_job_status` depend on `gs://` buckets and Google Batch
+  respectively, so they do not apply to a Terra workspace backed by Azure
+  storage; the FISS tools are unaffected. `get_batch_job_status` also needs the
+  workspace's Cromwell to be on Batch rather than the older Pipelines API.
+- **Requester-pays buckets** are unsupported in both GCS backends (would need
+  `userProject` / `user_project`).
+
 ### Important FISS API Notes
 - API has rate limits - implement exponential backoff
 - Workflow logs are in Google Cloud Storage (GCS), accessed via gs:// URLs
@@ -180,10 +246,10 @@ All planned tools have been successfully implemented following test-driven devel
 ### FISS API Functions Used
 
 **Workspace & Discovery:**
-- `fapi.list_workspaces()` - List accessible workspaces
+- `fapi.list_workspaces(fields=...)` - List accessible workspaces; `fields` is a comma-separated list of dotted paths such as `workspace.namespace,workspace.name`, and without it Terra returns every field of every workspace
 - `fapi.get_workspace(namespace, workspace)` - Get workspace metadata and attributes (dashboard data)
 - `fapi.list_entity_types(namespace, workspace)` - List data tables
-- `fapi.get_entities(namespace, workspace, etype)` - Get all entities of a type
+- `fapi.get_entities_query(namespace, workspace, etype, page=, page_size=, filter_terms=, fields=)` - One page of entities; `fields` is a comma-separated string. Preferred over `fapi.get_entities`, which has no paging and times out on real tables
 
 **Workflow Monitoring:**
 - `fapi.list_submissions(namespace, workspace)` - List all submissions
@@ -210,11 +276,94 @@ All planned tools have been successfully implemented following test-driven devel
 - `batch_v1.BatchServiceClient.get_job(name)` - Get Batch job status and events for infrastructure debugging
 
 **Google Cloud Storage (read-only):**
+
+All GCS access goes through `src/terra_mcp/gcs.py`, never `storage.Client()`
+directly, because two backends have to be interchangeable (see "Two GCS
+backends" below). The interface is `list_objects`, `stat_object`, `read_range`,
+`read_text`, `download`; both backends return the same dict shapes and raise
+`google.cloud.exceptions.NotFound` / `Forbidden`.
+
+JSON backend (`google-cloud-storage`, default):
 - `storage.Client()` - GCS client using Application Default Credentials
 - `client.list_blobs(bucket, prefix=, max_results=, delimiter=)` - List objects in a bucket/prefix
-- `client.bucket(name).get_blob(blob_name)` - Get a single blob by name (returns None if not found)
+- `client.bucket(name).get_blob(blob_name)` - Stat a blob (returns None if not found)
+- `client.bucket(name).blob(name)` - Blob handle without a metadata round trip
 - `blob.download_as_bytes(start=, end=)` - Download a byte range (inclusive end)
 - `blob.download_to_filename(path)` - Stream a complete blob to local disk
+
+XML backend (`requests`, for sandboxes that block `storage.googleapis.com`):
+- `GET https://{bucket}.storage.googleapis.com/?list-type=2&prefix=&delimiter=&continuation-token=` - List (S3-compatible XML)
+- `HEAD https://{bucket}.storage.googleapis.com/{key}` - Metadata from `x-goog-*` headers
+- `GET ... {key}` with `Range: bytes=a-b` - Byte range read
+- Auth: `google.auth.default(scopes=[devstorage.read_only])` + `creds.refresh()`, `Authorization: Bearer`
+
+### Claude Science support is macOS-only
+
+The connector install path (`scripts/install-claude-science.sh`, the README's
+Claude Science section) was written and tested only on macOS, and the installer
+dies on anything else: `[[ "$(uname -s)" == "Darwin" ]] || die ...`. Claude
+Science also runs on Windows 11 and Linux x64, and nothing in the server is
+macOS-specific, but the install layout is built around macOS particulars (a
+Homebrew interpreter outside `$HOME`, `/opt/fiss-mcp`, `/private/tmp`, the
+observed sandbox behaviour) and Windows has different local-connector rules
+(command must start with `npx`, `node`, `python` or a full path; `npm`, `.cmd`,
+`.bat` and `.ps1` launches are unsupported). Supporting either means working out
+and *testing* a new layout, not editing the docs.
+
+### Two GCS backends (`--gcs-backend`)
+
+- **Why**: Claude Science runs local MCP servers in a sandbox that permanently
+  blocks `storage.googleapis.com`, the only host the GCS **JSON** API is served
+  on. Its UI allows a bucket's own hostname
+  (`{bucket}.storage.googleapis.com`), which serves the GCS **XML** API. So
+  `client_options={"api_endpoint": ...}` cannot rescue the stock client; a
+  second code path was required.
+- **`auto` (default)**: try JSON once; on a connection-level failure (proxy
+  refusal, DNS) switch to XML and latch that for the process. A 403/404 *from
+  GCS* means the host is reachable and must not trigger a switch - that
+  distinction lives in `gcs._looks_unreachable`.
+- **The probe must be retry-bounded.** `google-cloud-storage`'s `DEFAULT_RETRY`
+  has a 120 s deadline and retries `requests.ConnectionError`, of which
+  `ProxyError` is a subclass, so an unbounded probe would retry a blocked host
+  for two minutes and the MCP client would time out before `auto` ever fell
+  back. While `_active_backend is None`, every JSON call passes
+  `DEFAULT_RETRY.with_timeout(PROBE_TIMEOUT_SECONDS)`; afterwards the library
+  default applies. Measured: the bounded policy gives up in 8 s over 5 attempts.
+- **Detection runs off the `__cause__` chain.** A bounded retry raises
+  `google.api_core.exceptions.RetryError`, *not* the `ProxyError`, so
+  `_looks_unreachable` has to walk `__cause__` / `__context__`. Break that and
+  `auto` silently stops falling back.
+- **The backend latches only after the XML call succeeds.** Latching on the
+  strength of a failed JSON call alone would let one transient reset degrade a
+  whole session to XML semantics (null `time_created`, no listing
+  `content_type`, ETag-derived `md5_hash`).
+- **The JSON client is cached** in a module global and cleared by
+  `set_backend()`; `tests/conftest.py` resets that state around every test,
+  since almost every test patches `storage.Client`.
+- **Deliberate XML-side gaps**: no `time_created` (not reported), no
+  `content_type` in listings, and listing `md5_hash` comes from the ETag so it
+  is `None` for composite objects. Requester-pays buckets are unsupported in
+  both backends (Terra workspace buckets are not requester-pays).
+- **Project is optional**: `storage.Client()` raises `EnvironmentError: Project
+  was not passed...` with user ADC and no readable gcloud config. Reads never
+  use the project, so `gcs._json_client()` falls back to a placeholder; the XML
+  backend needs no project at all.
+
+### Logging: `ctx.*` must be awaited
+
+`Context.info/debug/warning/error` are coroutines in FastMCP >= 3. Calling one
+without `await` drops the message and only emits a `RuntimeWarning`, which hid
+the real exception behind every "verify your Google credentials" error.
+`tests/test_server.py::TestServerInitialization::test_every_ctx_log_call_is_awaited`
+walks the AST and fails if any `ctx.*` call is unawaited or sits in a sync
+`def`. Helpers that log therefore have to be `async` (`_check_write_access`,
+`_fetch_gcs_log`).
+
+Errors go through `_log_error(ctx, message)`, which both sends the MCP log
+notification and mirrors the message (with traceback, when in an except block)
+to stderr - Claude Science surfaces only stderr. Generic handlers also append
+`Underlying error: {type(e).__name__}: {e}` to their `ToolError` text, since
+masked messages made failures undiagnosable from the client side.
 
 ## Development Notes & Learnings
 
@@ -238,13 +387,24 @@ All planned tools have been successfully implemented following test-driven devel
 - Access underlying function via `.fn` attribute: `mcp._tool_manager._tools["tool_name"].fn`
 - Always import `ToolError` from `fastmcp.exceptions`, not `fastmcp` directly
 - Use `pytest.mark.asyncio` for all async tool tests
-- Mock context object (`ctx = MagicMock()`) for logging verification
+- Mock context object (`ctx = AsyncMock()`) for logging verification - `MagicMock` fails on `await ctx.info(...)` since FastMCP 3 made the log methods coroutines
+- GCS tests patch `terra_mcp.gcs.storage.Client` (the module that now owns the client), not `terra_mcp.server.storage.Client`
 
 ### Git Workflow Best Practices
 - **Never amend pushed commits**: Once a commit has been pushed to a remote branch, do not use `git commit --amend`. This rewrites history and requires force pushing, which can cause issues for collaborators.
 - **Create new commits for fixes**: If you need to fix something after pushing, create a new commit with the fix rather than amending the previous one.
 - **Use feature branches**: Create a feature branch for each new feature or bug fix. This keeps the main branch clean and makes PRs easier to review.
 - **Commit message format**: Use clear, descriptive commit messages. Include a summary line, optional body, and `Co-Authored-By` trailer when appropriate.
+
+### Running behind a SOCKS proxy (`socksio`)
+
+httpx, which fastmcp uses, builds a transport for **every** proxy present in the
+environment when a client is constructed, so a `socks5h://` value in `ALL_PROXY`
+raises `ImportError: Using SOCKS proxy, but the 'socksio' package is not
+installed` at startup even when all real traffic goes through the plain HTTP
+proxy in `HTTPS_PROXY`. Claude Science's sandbox sets exactly that, so `socksio`
+is a declared dependency. Our own calls are unaffected: `requests` selects the
+explicit `https` proxy, so the GCS XML backend needs no `PySocks`.
 
 ### FISS Installation
 - The `setuptools<80` / `--no-build-isolation` workaround (fiss#192) was removed after firecloud 0.16.39 fixed the upstream issue (fiss#200)
@@ -387,7 +547,7 @@ Claude Code (and similar agents) do not currently consume skills served via MCP 
 
 ## Future Enhancements
 
-Potential areas for expansion beyond the current 15 tools:
+Potential areas for expansion beyond the current 21 tools:
 
 ### Workflow Analysis & Optimization
 - Automatic cost optimization suggestions based on resource usage
